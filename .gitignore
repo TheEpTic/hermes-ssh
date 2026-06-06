@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+data/machines.json
+data/sessions.json
+data/sockets/
