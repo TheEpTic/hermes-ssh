@@ -20,7 +20,7 @@ SSH remote execution plugin for [Hermes Agent](https://github.com/NousResearch/h
 ```bash
 # Clone and symlink into ~/.hermes/plugins/
 git clone https://github.com/TheEpTic/hermes-ssh.git
-ln -s ./hermes-ssh/ssh_tools ~/.hermes/plugins/hermes-ssh
+ln -s ./hermes-ssh/src/ssh_tools ~/.hermes/plugins/hermes-ssh
 
 # Or use the deploy script
 ./deploy.sh hermes-ssh

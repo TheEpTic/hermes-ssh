@@ -15,9 +15,9 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install ruff==0.11.13 mypy==1.16.0
-      - run: ruff check ssh_tools/ tests/
-      - run: ruff format --check ssh_tools/ tests/
-      - run: mypy ssh_tools/
+      - run: ruff check src/ssh_tools/ tests/
+      - run: ruff format --check src/ssh_tools/ tests/
+      - run: mypy src/ssh_tools/
 
   test:
     runs-on: ubuntu-latest

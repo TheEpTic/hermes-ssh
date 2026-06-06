@@ -15,13 +15,13 @@ pip install -e '.[dev]'
 
 ```bash
 # Lint
-ruff check ssh_tools/ tests/
+ruff check src/ssh_tools/ tests/
 
 # Format
-ruff format ssh_tools/ tests/
+ruff format src/ssh_tools/ tests/
 
 # Type check
-mypy ssh_tools/
+mypy src/ssh_tools/
 
 # Tests
 pytest
@@ -36,16 +36,17 @@ pytest
 ## Project Structure
 
 ```
-ssh_tools/
-├── __init__.py      # Plugin registration + slash command
-├── config.py        # SSHConfig dataclass
-├── manager.py       # SSHManager — machines, sessions, execution
-├── schemas.py       # Tool schemas (what the LLM sees)
-├── tools.py         # Tool handlers (thin wrappers)
-├── plugin.yaml      # Plugin manifest
-└── py.typed         # PEP 561 marker
+src/
+└── ssh_tools/
+    ├── __init__.py      # Plugin registration + slash command
+    ├── config.py        # SSHConfig dataclass
+    ├── manager.py       # SSHManager — machines, sessions, execution
+    ├── schemas.py       # Tool schemas (what the LLM sees)
+    ├── tools.py         # Tool handlers (thin wrappers)
+    ├── plugin.yaml      # Plugin manifest
+    └── py.typed         # PEP 561 marker
 tests/
-├── conftest.py      # Shared fixtures
+├── conftest.py          # Shared fixtures
 ├── test_config.py
 ├── test_manager.py
 └── test_tools.py

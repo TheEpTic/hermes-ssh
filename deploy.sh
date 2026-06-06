@@ -10,7 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HERMES_PLUGINS="${HERMES_PLUGINS:-$HOME/.hermes/plugins}"
 PLUGIN_NAME="hermes-ssh"
-SRC="$SCRIPT_DIR/ssh_tools"
+SRC="$SCRIPT_DIR/src/ssh_tools"
 DST="$HERMES_PLUGINS/$PLUGIN_NAME"
 
 if [[ "${1:-}" == "--clean" ]]; then
