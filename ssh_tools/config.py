@@ -25,7 +25,6 @@ class SSHConfig:
     # Session management
     idle_check_interval: int = 60  # seconds between idle checks
     idle_timeout_minutes: int = 30  # auto-kill after this
-    session_end_idle_threshold: int = 10  # minutes, for on_session_end hook
     closed_prune_hours: int = 24  # remove closed sessions after this
 
     # Paths (derived from data_dir)

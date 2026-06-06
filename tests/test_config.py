@@ -32,7 +32,6 @@ def test_config_defaults() -> None:
     assert config.command_timeout == 30
     assert config.idle_check_interval == 60
     assert config.idle_timeout_minutes == 30
-    assert config.session_end_idle_threshold == 10
     assert config.closed_prune_hours == 24
 
 
