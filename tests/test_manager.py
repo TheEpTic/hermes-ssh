@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from ssh_tools.manager import Machine, Session
+from ssh_tools.models import Machine, Session
 
 from .conftest import _make_manager
 
@@ -308,6 +308,7 @@ def test_touch_session(tmp_path: Path) -> None:
 
     mgr.touch_session("s1")
     s = mgr.get_session("s1")
+    assert s is not None
     assert s.command_count == 2
 
 

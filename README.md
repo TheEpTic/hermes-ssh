@@ -4,119 +4,126 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-SSH remote execution plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Gives Hermes first-class SSH tools with machine registry, session tracking, and connection reuse.
+SSH remote execution plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-## Features
+Run commands on remote servers, track sessions, reuse connections — all from inside Hermes.
 
-- **`ssh_terminal`** — run commands on remote machines via SSH
-- **`ssh_machines`** — machine registry with aliases, tags, and connectivity tests
-- **`ssh_sessions`** — session tracking with idle detection and cleanup
-- **ControlMaster** — persistent SSH connections with 5-minute reuse window
-- **bash wrapping** — commands run through `bash -c` with `pipefail` enabled, so pipeline exit codes are always correct
-- **`/ssh` slash command** — quick machine inspection and command execution from chat
+```
+/ssh web1 uptime
+ssh_machines add name=web1 host=192.168.1.50
+ssh_sessions list
+```
 
-## Install
+## Quick Start
 
 ```bash
-# Clone and symlink into ~/.hermes/plugins/
+# Clone and deploy
+git clone https://github.com/TheEpTic/hermes-ssh.git
+cd hermes-ssh
+./deploy.sh
+
+# Restart Hermes
+/reset
+```
+
+Or manually:
+
+```bash
 git clone https://github.com/TheEpTic/hermes-ssh.git
 ln -s ./hermes-ssh/src/ssh_tools ~/.hermes/plugins/hermes-ssh
-
-# Or use the deploy script
-./deploy.sh hermes-ssh
+# Then /reset in Hermes
 ```
 
-Then restart Hermes (`/reset` or `gateway restart`).
+## What It Does
 
-## Usage
+**`ssh_terminal`** — Run any command on a remote machine. Commands run through `bash -c` with `pipefail`, so pipelines work correctly.
 
-### Add a machine
+**`ssh_machines`** — Register servers once, refer to them by name. Supports aliases, tags, and connectivity tests.
 
+**`ssh_sessions`** — Tracks every command you run. Idle sessions get cleaned up automatically after 30 minutes.
+
+**`/ssh` slash command** — Quick access from chat. Inspect machines, run commands, test connectivity.
+
+### Connection Reuse
+
+SSH connections are reused via `ControlMaster` with a 5-minute persist window. The second command to the same host is instant.
+
+### Examples
+
+```bash
+# Add a server
+ssh_machines add name=web1 host=192.168.1.50 user=deploy key=~/.ssh/id_ed25519
+
+# Run a command
+ssh_terminal machine=web1 command="df -h"
+
+# Via slash command
+/ssh web1 uptime
+/ssh web1 docker ps
+
+# Check connectivity
+/ssh test
+
+# Clean up idle sessions
+/ssh cleanup
 ```
-/ssh test myserver          # test connectivity
-ssh_machines add            # via tool call
-```
 
-### Run a command
+## How It Works
 
-```
-/ssh myserver uptime        # via slash command
-ssh_terminal                # via tool call
-```
+hermes-ssh gives Hermes three tools and one slash command:
 
-### Manage sessions
+| Tool | Purpose |
+|------|---------|
+| `ssh_terminal` | Run commands on remote machines |
+| `ssh_machines` | Manage the machine registry |
+| `ssh_sessions` | Track and clean up sessions |
+| `/ssh` | Chat-native interface to all of the above |
 
-```
-/ssh cleanup                # kill idle sessions
-ssh_sessions list           # via tool call
-```
-
-## Tool Reference
-
-### ssh_terminal
-
-Run a command on a remote machine via SSH. Uses the machine registry — add machines first with ssh_machines.
-
-- **`machine`** (string, required) — Machine name or alias
-- **`command`** (string, required) — Command to run
-- **`timeout`** (integer, optional) — Seconds before kill (default: 30)
-- **`new_session`** (boolean, optional) — Force new connection (default: false)
-
-### ssh_machines
-
-Manage the SSH machine registry.
-
-- **`action`** (string, required) — `list`, `add`, `remove`, `inspect`, `test`
-- **`name`** (string, required for add/remove/inspect/test) — Machine name
-- **`host`** (string, required for add) — IP or hostname
-- **`user`** (string, optional) — SSH user (default: root)
-- **`port`** (integer, optional) — SSH port (default: 22)
-- **`key`** (string, optional) — Path to SSH key
-- **`aliases`** (array, optional) — Short aliases
-- **`tags`** (array, optional) — Tags for organization
-
-### ssh_sessions
-
-Manage active SSH sessions.
-
-- **`action`** (string, required) — `list`, `kill`, `cleanup`, `prune`
-- **`session_id`** (string, required for kill) — Session ID
-- **`max_idle_minutes`** (integer, optional) — Idle threshold (default: 30)
+Machines are stored in `data/machines.json` inside the plugin directory. Sessions are tracked in `data/sessions.json`. ControlMaster sockets live in `data/sockets/`. Everything is local — no external services.
 
 ## Configuration
 
-All config is handled via the `SSHConfig` dataclass in `config.py`. Key defaults:
+All settings live in `src/ssh_tools/config.py` as `SSHConfig`:
 
-| Setting | Default | Description |
-|---------|---------|-------------|
+| Setting | Default | What It Does |
+|---------|---------|--------------|
 | `default_port` | 22 | SSH port for new machines |
 | `default_user` | root | SSH user for new machines |
-| `connect_timeout` | 5s | Connection timeout |
-| `command_timeout` | 30s | Command execution timeout |
-| `idle_timeout_minutes` | 30m | Auto-kill idle sessions |
-| `strict_host_key_checking` | no | SSH host key verification |
-
-### Runtime data
-
-Machine and session data is stored in `data/` relative to the plugin directory:
-
-- `data/machines.json` — registered machines
-- `data/sessions.json` — active/closed sessions
-- `data/sockets/` — ControlMaster Unix sockets
-
-These files are created automatically on first use. Add `data/` to your `.gitignore` if forking.
+| `connect_timeout` | 5s | How long to wait for SSH handshake |
+| `command_timeout` | 30s | How long before a command is killed |
+| `idle_timeout_minutes` | 30m | Auto-kill sessions idle longer than this |
+| `strict_host_key_checking` | no | Host key verification |
 
 ## Security
 
-**⚠️ `StrictHostKeyChecking=no` is the default.** This prevents connection failures on first use but makes connections vulnerable to MITM attacks. For production hosts over untrusted networks, set `StrictHostKeyChecking=yes` in your SSH config.
+**`StrictHostKeyChecking=no` is the default.** This makes first-time connections work without manual key verification, but means you're vulnerable to MITM attacks on untrusted networks. For production hosts, set it to `yes` in your SSH config.
 
-See [SECURITY.md](SECURITY.md) for full security considerations.
+Machine credentials (host, user, key path) are stored in plaintext JSON. The data directory is created inside the plugin directory with default filesystem permissions.
+
+See [SECURITY.md](SECURITY.md) for the full picture.
 
 ## Requirements
 
 - Python 3.11+
 - OpenSSH client (`ssh`)
-- Hermes Agent
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+
+## Development
+
+```bash
+git clone https://github.com/TheEpTic/hermes-ssh.git
+cd hermes-ssh
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+
+# Run checks
+ruff check src/ssh_tools/ tests/
+ruff format --check src/ssh_tools/ tests/
+mypy src/ssh_tools/
+pytest
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and project structure.
 
 ## License
 
