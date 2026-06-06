@@ -525,7 +525,11 @@ def test_build_ssh_args(tmp_path: Path) -> None:
     assert "~/.ssh/test" in args
     assert "ControlMaster=auto" in args
     assert "admin@10.0.0.1" in args
-    assert args[-1] == "uptime"
+    # Command is wrapped in bash -c 'set -o pipefail; ...'
+    assert "bash" in args
+    assert "-c" in args
+    assert "pipefail" in args[-1]
+    assert "uptime" in args[-1]
 
 
 def test_build_ssh_args_no_control_path(tmp_path: Path) -> None:
@@ -562,10 +566,20 @@ def test_build_ssh_args_timeout_clamping(tmp_path: Path) -> None:
 def test_start_stop_idle_checker(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.start_idle_checker()
-    assert mgr._checker_event.is_set()
+    assert mgr._checker_thread is not None
+    assert mgr._checker_thread.is_alive()
 
     mgr.stop_idle_checker()
-    # Event is set to signal stop
+    # Event is set — thread will exit after current sleep/cleanup cycle
+    assert mgr._checker_event.is_set()
+
+
+def test_stop_idle_checker_sets_event(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    assert not mgr._checker_event.is_set()
+    mgr.start_idle_checker()
+    mgr.stop_idle_checker()
+    assert mgr._checker_event.is_set()
 
 
 def test_start_idle_checker_idempotent(tmp_path: Path) -> None:

@@ -523,7 +523,7 @@ class SSHManager:
     # ----- Background idle checker -----
 
     def start_idle_checker(self) -> None:
-        if self._checker_event.is_set():
+        if self._checker_thread is not None and self._checker_thread.is_alive():
             return
 
         def _loop() -> None:
@@ -532,6 +532,7 @@ class SSHManager:
                     self.cleanup_idle()
                 time.sleep(self._config.idle_check_interval)
 
+        self._checker_event.clear()
         self._checker_thread = threading.Thread(target=_loop, daemon=True)
         self._checker_thread.start()
 

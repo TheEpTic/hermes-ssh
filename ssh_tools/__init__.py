@@ -16,6 +16,18 @@ from .manager import SSHManager
 from .schemas import SSH_MACHINES_SCHEMA, SSH_SESSIONS_SCHEMA, SSH_TERMINAL_SCHEMA
 from .tools import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
 
+__version__ = "0.1.0"
+__all__ = [
+    "SSHManager",
+    "SSH_TERMINAL_SCHEMA",
+    "SSH_MACHINES_SCHEMA",
+    "SSH_SESSIONS_SCHEMA",
+    "handle_ssh_terminal",
+    "handle_ssh_machines",
+    "handle_ssh_sessions",
+    "register",
+]
+
 logger = logging.getLogger(__name__)
 
 # Module-level manager — initialized in register()
