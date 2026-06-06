@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import signal
 import subprocess
 import tempfile
@@ -136,7 +137,6 @@ class Session:
 # ---------------------------------------------------------------------------
 # SSH Manager
 # ---------------------------------------------------------------------------
-
 
 class SSHManager:
     """Owns all SSH plugin state: machines, sessions, connections.
@@ -470,11 +470,16 @@ class SSHManager:
                     "-o",
                     f"ControlPath={control_path}",
                     "-o",
-                    "ControlPersist=no",
+                    "ControlPersist=300",
                 ]
             )
         cmd.append(f"{machine.user}@{machine.host}")
-        cmd.append(command)
+        # Wrap in bash -c to ensure bash features (pipefail, [[, etc.) work
+        # regardless of the remote user's default shell.  set -o pipefail
+        # makes pipeline exit codes predictable (non-zero if any component
+        # fails, not just the last command).
+        wrapped = f"set -o pipefail; {command}"
+        cmd.extend(["bash", "-c", shlex.quote(wrapped)])
         return cmd
 
     def run_command(
