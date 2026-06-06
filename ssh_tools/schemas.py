@@ -8,7 +8,7 @@ SSH_TERMINAL_SCHEMA = {
         "properties": {
             "machine": {
                 "type": "string",
-                "description": "Machine name or alias (e.g. 'elder', 'grid1')",
+                "description": "Machine name or alias (e.g. 'myserver', 'web1')",
             },
             "command": {
                 "type": "string",

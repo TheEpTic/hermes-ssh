@@ -1,4 +1,4 @@
-"""ssh-tools — SSH session management plugin for Hermes.
+"""hermes-ssh — SSH remote execution plugin for Hermes Agent.
 
 Provides:
   - ssh_terminal: Run commands on remote machines via SSH
@@ -25,7 +25,7 @@ _manager: SSHManager | None = None
 def _get_manager() -> SSHManager:
     global _manager
     if _manager is None:
-        raise RuntimeError("ssh-tools plugin not registered. Call register() first.")
+        raise RuntimeError("hermes-ssh plugin not registered. Call register() first.")
     return _manager
 
 
@@ -120,24 +120,6 @@ def _handle_slash(raw_args: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Session end hook
-# ---------------------------------------------------------------------------
-
-
-def _on_session_end(session_id: str = "", **kwargs: Any) -> None:
-    try:
-        manager = _get_manager()
-        result = manager.cleanup_idle(max_idle_minutes=manager.config.session_end_idle_threshold)
-        if result["count"] > 0:
-            logger.info(
-                "ssh-tools: auto-cleaned %d idle session(s) on session end",
-                result["count"],
-            )
-    except Exception as exc:
-        logger.debug("ssh-tools: session-end cleanup failed: %s", exc)
-
-
-# ---------------------------------------------------------------------------
 # Plugin registration
 # ---------------------------------------------------------------------------
 
@@ -146,7 +128,7 @@ def register(ctx: Any) -> None:
     """Register SSH tools with Hermes."""
     global _manager
     if _manager is not None:
-        logger.debug("ssh-tools: already registered, skipping")
+        logger.debug("hermes-ssh: already registered, skipping")
         return
     _manager = SSHManager()
 
@@ -173,9 +155,6 @@ def register(ctx: Any) -> None:
         description="Manage active SSH sessions.",
     )
 
-    # Hooks
-    ctx.register_hook("on_session_end", _on_session_end)
-
     # Slash command
     ctx.register_command(
         "ssh",
@@ -186,4 +165,4 @@ def register(ctx: Any) -> None:
     # Start background idle checker
     _manager.start_idle_checker()
 
-    logger.info("ssh-tools plugin loaded")
+    logger.info("hermes-ssh plugin loaded")

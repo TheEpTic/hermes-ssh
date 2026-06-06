@@ -1,9 +1,24 @@
 [project]
-name = "ssh-tools"
+name = "hermes-ssh"
 version = "0.1.0"
-description = "SSH session management plugin for Hermes Agent"
+description = "SSH remote execution plugin for Hermes Agent"
 requires-python = ">=3.11"
 license = "MIT"
+authors = [
+    { name = "TheEpTic", email = "nexus@eptic.me" },
+]
+
+[project.urls]
+Homepage = "https://github.com/TheEpTic/hermes-ssh"
+Repository = "https://github.com/TheEpTic/hermes-ssh"
+Issues = "https://github.com/TheEpTic/hermes-ssh/issues"
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["ssh_tools"]

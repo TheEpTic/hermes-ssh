@@ -1,8 +1,24 @@
 __pycache__/
 *.pyc
 *.pyo
-ssh_tools/data/machines.json
-ssh_tools/data/sessions.json
-ssh_tools/data/sockets/
 .venv/
-ssh_tools.egg-info/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Environment and secrets
+.env
+
+# OS
+.DS_Store
+
+# Runtime data (persisted locally, not tracked)
+data/
+sockets/

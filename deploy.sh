@@ -1,73 +1,44 @@
 #!/usr/bin/env bash
-# deploy.sh — symlink nexus-plugins into ~/.hermes/plugins/
+# deploy.sh — symlink hermes-ssh into ~/.hermes/plugins/
 #
 # Usage:
-#   ./deploy.sh              # deploy all plugins (except _template)
-#   ./deploy.sh ssh-tools    # deploy specific plugin(s)
-#   ./deploy.sh --clean      # remove all symlinks
+#   ./deploy.sh          # install
+#   ./deploy.sh --clean  # uninstall
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HERMES_PLUGINS="${HERMES_PLUGINS:-$HOME/.hermes/plugins}"
-CLEAN=false
-TARGETS=()
+PLUGIN_NAME="hermes-ssh"
+SRC="$SCRIPT_DIR/ssh_tools"
+DST="$HERMES_PLUGINS/$PLUGIN_NAME"
 
-for arg in "$@"; do
-    case "$arg" in
-        --clean) CLEAN=true ;;
-        --help|-h)
-            echo "Usage: $0 [--clean] [plugin-name ...]"
-            echo "  No args    Deploy all plugins (skip _template)"
-            echo "  plugin     Deploy specific plugin(s)"
-            echo "  --clean    Remove all nexus-plugins symlinks"
-            exit 0
-            ;;
-        *) TARGETS+=("$arg") ;;
-    esac
-done
-
-mkdir -p "$HERMES_PLUGINS"
-
-if $CLEAN; then
-    echo "Cleaning nexus-plugin symlinks from $HERMES_PLUGINS ..."
-    for link in "$HERMES_PLUGINS"/*; do
-        if [ -L "$link" ] && readlink "$link" | grep -q "$SCRIPT_DIR"; then
-            rm "$link"
-            echo "  removed: $(basename "$link")"
-        fi
-    done
-    echo "Done."
+if [[ "${1:-}" == "--clean" ]]; then
+    if [ -L "$DST" ]; then
+        rm "$DST"
+        echo "removed: $DST"
+    else
+        echo "nothing to remove"
+    fi
     exit 0
 fi
 
-# If no targets specified, deploy everything except _template
-if [ ${#TARGETS[@]} -eq 0 ]; then
-    for dir in "$SCRIPT_DIR"/*/; do
-        name="$(basename "$dir")"
-        [[ "$name" == _template ]] && continue
-        [[ -f "$dir/plugin.yaml" ]] && TARGETS+=("$name")
-    done
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    echo "Usage: $0 [--clean]"
+    echo "  No args    Symlink plugin into ~/.hermes/plugins/"
+    echo "  --clean    Remove the symlink"
+    exit 0
 fi
 
-for name in "${TARGETS[@]}"; do
-    src="$SCRIPT_DIR/$name"
-    dst="$HERMES_PLUGINS/$name"
+mkdir -p "$HERMES_PLUGINS"
 
-    if [ ! -f "$src/plugin.yaml" ]; then
-        echo "SKIP: $name (no plugin.yaml found)"
-        continue
-    fi
+if [ -L "$DST" ]; then
+    rm "$DST"
+elif [ -d "$DST" ]; then
+    echo "SKIP: $DST exists and is not a symlink — not removing"
+    exit 1
+fi
 
-    if [ -L "$dst" ]; then
-        rm "$dst"
-    elif [ -d "$dst" ]; then
-        echo "SKIP: $name (directory exists at $dst, not a symlink — not removing)"
-        continue
-    fi
-
-    ln -s "$src" "$dst"
-    echo "deployed: $name -> $src"
-done
-
-echo "Done. Restart Hermes (/reset or gateway restart) to load plugins."
+ln -s "$SRC" "$DST"
+echo "deployed: $PLUGIN_NAME -> $SRC"
+echo "Restart Hermes (/reset or gateway restart) to load."

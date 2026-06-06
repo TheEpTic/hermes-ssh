@@ -1,7 +1,6 @@
-# ssh-tools — Hermes SSH management plugin
-name: ssh-tools
+# hermes-ssh — Hermes SSH management plugin
+name: hermes-ssh
 version: 0.1.0
-description: "SSH terminal management — machine registry, session tracking, idle alerts, and a proper ssh_terminal tool for Hermes."
-author: nexus
-hooks:
-  - on_session_end
+description: "SSH remote execution for Hermes Agent — machine registry, session tracking, and a proper ssh_terminal tool."
+author: TheEpTic
+hooks: []
