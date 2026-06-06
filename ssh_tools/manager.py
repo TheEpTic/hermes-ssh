@@ -17,8 +17,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -139,6 +138,7 @@ class Session:
 # SSH Manager
 # ---------------------------------------------------------------------------
 
+
 class SSHManager:
     """Owns all SSH plugin state: machines, sessions, connections.
 
@@ -189,7 +189,8 @@ class SSHManager:
 
     def _load_machines(self) -> dict[str, dict[str, Any]]:
         raw = self._read_json(self._config.machines_file, {"machines": {}})
-        return raw.get("machines", {})
+        result: dict[str, dict[str, Any]] = raw.get("machines", {})
+        return result
 
     def _save_machines(self, machines: dict[str, dict[str, Any]]) -> None:
         self._write_json(self._config.machines_file, {"machines": machines})
@@ -207,6 +208,13 @@ class SSHManager:
         for mname, mdata in machines.items():
             if name in mdata.get("aliases", []):
                 return Machine.from_dict(mname, mdata)
+        return None
+
+    def _resolve_alias(self, name: str, machines: dict[str, dict[str, Any]]) -> str | None:
+        """Resolve an alias to canonical name within a pre-loaded machines dict."""
+        for mname, mdata in machines.items():
+            if name in mdata.get("aliases", []):
+                return mname
         return None
 
     def resolve_name(self, name: str) -> str | None:
@@ -235,10 +243,8 @@ class SSHManager:
     def remove_machine(self, name: str) -> bool:
         with self._lock:
             machines = self._load_machines()
-            canonical = name if name in machines else next(
-                (mname for mname, mdata in machines.items()
-                 if name in mdata.get("aliases", [])),
-                None,
+            canonical: str | None = (
+                name if name in machines else self._resolve_alias(name, machines)
             )
             if canonical and canonical in machines:
                 del machines[canonical]
@@ -282,7 +288,8 @@ class SSHManager:
 
     def _load_sessions(self) -> dict[str, dict[str, Any]]:
         raw = self._read_json(self._config.sessions_file, {"sessions": {}})
-        return raw.get("sessions", {})
+        result: dict[str, dict[str, Any]] = raw.get("sessions", {})
+        return result
 
     def _save_sessions(self, sessions: dict[str, dict[str, Any]]) -> None:
         self._write_json(self._config.sessions_file, {"sessions": sessions})
@@ -340,7 +347,13 @@ class SSHManager:
             self._save_sessions(sessions)
 
     def kill_session(self, session_id: str) -> dict[str, Any]:
-        """Kill an active SSH session by PID and close control socket."""
+        """Kill an active SSH session by PID and close control socket.
+
+        Note: There is a small race window between SIGTERM and the SIGKILL
+        fallback check where the PID could be recycled by another process.
+        In practice this is extremely unlikely (0.5s window, PIDs rarely
+        recycle that fast on busy systems) but worth being aware of.
+        """
         session = self.get_session(session_id)
         if not session:
             return {"success": False, "error": f"Session '{session_id}' not found"}

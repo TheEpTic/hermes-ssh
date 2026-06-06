@@ -5,16 +5,15 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from ssh_tools.config import SSHConfig
-from ssh_tools.manager import Machine, SSHManager
+import ssh_tools
+from ssh_tools import _handle_slash
+from ssh_tools.manager import Machine, Session
 from ssh_tools.tools import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
+
+from .conftest import _make_manager
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _make_manager(tmp_path: Path) -> SSHManager:
-    return SSHManager(SSHConfig(data_dir=tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +158,6 @@ def test_sessions_list_empty(tmp_path: Path) -> None:
 
 
 def test_sessions_list_with_data(tmp_path: Path) -> None:
-    from ssh_tools.manager import Session
-
     mgr = _make_manager(tmp_path)
     mgr.register_session(Session(id="s1", machine="host1"))
     handler = handle_ssh_sessions(mgr)
@@ -207,3 +204,67 @@ def test_sessions_unknown_action(tmp_path: Path) -> None:
     result = json.loads(handler({"action": "bogus"}))
     assert result["success"] is False
     assert "Unknown action" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Slash command handler (_handle_slash)
+# ---------------------------------------------------------------------------
+
+
+def test_slash_no_args_shows_help(tmp_path: Path) -> None:
+    ssh_tools._manager = _make_manager(tmp_path)
+    result = _handle_slash("")
+    assert result is not None
+    assert "ssh" in result.lower() or "SSH" in result
+
+
+def test_slash_help_keyword(tmp_path: Path) -> None:
+    ssh_tools._manager = _make_manager(tmp_path)
+    result = _handle_slash("help")
+    assert result is not None
+    assert "ssh" in result.lower() or "SSH" in result
+
+
+def test_slash_test_no_machines(tmp_path: Path) -> None:
+    ssh_tools._manager = _make_manager(tmp_path)
+    result = _handle_slash("test")
+    assert result is not None
+    assert "No machines" in result
+
+
+def test_slash_cleanup_no_idle(tmp_path: Path) -> None:
+    ssh_tools._manager = _make_manager(tmp_path)
+    result = _handle_slash("cleanup")
+    assert result is not None
+    assert "No idle" in result
+
+
+def test_slash_unknown_machine(tmp_path: Path) -> None:
+    ssh_tools._manager = _make_manager(tmp_path)
+    result = _handle_slash("nonexistent")
+    assert result is not None
+    assert "not found" in result.lower()
+
+
+def test_slash_inspect_machine(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(
+        Machine(
+            name="host1", host="10.0.0.1", user="admin", port=2222, aliases=["h1"], tags=["dev"]
+        )
+    )
+    ssh_tools._manager = mgr
+    result = _handle_slash("host1")
+    assert result is not None
+    assert "host1" in result
+    assert "10.0.0.1" in result
+    assert "admin" in result
+
+
+def test_slash_inspect_by_alias(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="host1", host="10.0.0.1", aliases=["h1"]))
+    ssh_tools._manager = mgr
+    result = _handle_slash("h1")
+    assert result is not None
+    assert "host1" in result

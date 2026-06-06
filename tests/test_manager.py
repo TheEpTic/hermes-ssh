@@ -6,8 +6,9 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from ssh_tools.config import SSHConfig
-from ssh_tools.manager import Machine, Session, SSHManager
+from ssh_tools.manager import Machine, Session
+
+from .conftest import _make_manager
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -127,11 +128,6 @@ def test_session_to_dict_roundtrip() -> None:
 # ---------------------------------------------------------------------------
 # SSHManager — machine registry
 # ---------------------------------------------------------------------------
-
-
-def _make_manager(tmp_path: Path) -> SSHManager:
-    config = SSHConfig(data_dir=tmp_path)
-    return SSHManager(config)
 
 
 def test_add_and_get_machine(tmp_path: Path) -> None:
