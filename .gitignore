@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 *.pyo
-data/machines.json
-data/sessions.json
-data/sockets/
+ssh_tools/data/machines.json
+ssh_tools/data/sessions.json
+ssh_tools/data/sockets/
+.venv/
+ssh_tools.egg-info/

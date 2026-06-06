@@ -6,23 +6,28 @@ Provides:
   - ssh_sessions: Active session tracking (list/kill/cleanup)
   - /ssh slash command for quick access
   - on_session_end hook for auto-cleanup of stale sessions
-
-Data files (in plugin's data/ dir):
-  - machines.json: Machine registry
-  - sessions.json: Active session tracking
-  - sockets/: SSH ControlMaster sockets
 """
+
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
-from . import sessions
+from .manager import SSHManager
 from .schemas import SSH_MACHINES_SCHEMA, SSH_SESSIONS_SCHEMA, SSH_TERMINAL_SCHEMA
 from .tools import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
 
 logger = logging.getLogger(__name__)
+
+# Module-level manager — initialized in register()
+_manager: SSHManager | None = None
+
+
+def _get_manager() -> SSHManager:
+    global _manager
+    if _manager is None:
+        raise RuntimeError("ssh-tools plugin not registered. Call register() first.")
+    return _manager
 
 
 # ---------------------------------------------------------------------------
@@ -35,45 +40,34 @@ _HELP = """\
 Subcommands:
   (no args)              List machines and active sessions
   <machine>              Show machine details
-  <machine> <command>    Run command on machine (delegates to ssh_terminal)
+  <machine> <command>    Run command on machine
   test                   Test connectivity to all machines
   cleanup                Kill all idle sessions (>30 min)
   help                   Show this help
-
-Examples:
-  /ssh                   — list everything
-  /ssh elder             — show elder details
-  /ssh elder uptime      — run 'uptime' on elder
-  /ssh test              — test all machines
-  /ssh cleanup           — kill idle sessions
 """
 
 
-def _handle_slash(raw_args: str) -> Optional[str]:
-    """Handle /ssh slash command."""
-    from . import registry
-
+def _handle_slash(raw_args: str) -> str | None:
+    manager = _get_manager()
     args = raw_args.strip().split()
 
     if not args or args[0] in ("help", "-h", "--help"):
         return _HELP
 
-    # /ssh test — test all machines
     if args[0] == "test":
-        machines = registry.list_machines()
+        machines = manager.list_machines()
         if not machines:
             return "No machines registered. Use ssh_machines to add one."
         lines = ["Testing connectivity:"]
-        for name in machines:
-            result = registry.test_machine(name)
-            status = "✓" if result["success"] else "✗"
+        for name, machine in machines.items():
+            result = manager.test_machine(name)
+            icon = "✓" if result["success"] else "✗"
             error = f" — {result.get('error', '')}" if not result["success"] else ""
-            lines.append(f"  {status} {name} ({machines[name]['host']}){error}")
+            lines.append(f"  {icon} {name} ({machine.host}){error}")
         return "\n".join(lines)
 
-    # /ssh cleanup
     if args[0] == "cleanup":
-        result = sessions.cleanup_idle(30)
+        result = manager.cleanup_idle()
         if result["count"] == 0:
             return "No idle sessions to clean up."
         lines = [f"Killed {result['count']} idle session(s):"]
@@ -81,17 +75,15 @@ def _handle_slash(raw_args: str) -> Optional[str]:
             lines.append(f"  - {item['session_id']} on {item.get('machine', '?')}")
         return "\n".join(lines)
 
-    # /ssh <machine> — inspect or run command
     name = args[0]
-    machine = registry.get_machine(name)
-    if not machine:
+    target = manager.get_machine(name)
+    if not target:
         return f"Machine '{name}' not found in registry."
 
-    # If there's a command, run it
+    # Run command if provided
     if len(args) > 1:
         command = " ".join(args[1:])
-        from .ssh import run_command
-        result = run_command(name, command)
+        result = manager.run_command(name, command)
         parts = []
         if result.get("stdout"):
             parts.append(result["stdout"].rstrip())
@@ -100,48 +92,46 @@ def _handle_slash(raw_args: str) -> Optional[str]:
         parts.append(f"exit: {result.get('exit_code', '?')} ({result.get('elapsed_secs', '?')}s)")
         return "\n".join(parts)
 
-    # Just inspect
-    canonical = registry.resolve_name(name)
+    # Inspect machine
+    canonical = manager.resolve_name(name)
+    assert canonical is not None  # machine exists, resolve must succeed
     lines = [
         f"Machine: {canonical}",
-        f"  Host: {machine['host']}",
-        f"  User: {machine['user']}",
-        f"  Port: {machine['port']}",
+        f"  Host: {target.host}",
+        f"  User: {target.user}",
+        f"  Port: {target.port}",
     ]
-    if machine.get("key"):
-        lines.append(f"  Key: {machine['key']}")
-    if machine.get("aliases"):
-        lines.append(f"  Aliases: {', '.join(machine['aliases'])}")
-    if machine.get("tags"):
-        lines.append(f"  Tags: {', '.join(machine['tags'])}")
-    if machine.get("description"):
-        lines.append(f"  Desc: {machine['description']}")
+    if target.key:
+        lines.append(f"  Key: {target.key}")
+    if target.aliases:
+        lines.append(f"  Aliases: {', '.join(target.aliases)}")
+    if target.tags:
+        lines.append(f"  Tags: {', '.join(target.tags)}")
+    if target.description:
+        lines.append(f"  Desc: {target.description}")
 
-    # Show active sessions for this machine
-    active = sessions.list_sessions("active")
-    machine_sessions = {k: v for k, v in active.items() if v.get("machine") == canonical}
+    active = manager.list_sessions("active")
+    machine_sessions = {k: v for k, v in active.items() if v.machine == canonical}
     if machine_sessions:
         lines.append(f"  Active sessions: {len(machine_sessions)}")
         for sid, s in machine_sessions.items():
-            idle = sessions.idle_seconds(sid)
-            idle_str = f"{idle}s" if idle is not None else "?"
-            lines.append(f"    - {sid} (idle: {idle_str}, commands: {s.get('command_count', 0)})")
+            lines.append(f"    - {sid} (idle: {s.idle_human}, commands: {s.command_count})")
 
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Session end hook — auto-cleanup
+# Session end hook
 # ---------------------------------------------------------------------------
 
-def _on_session_end(session_id: str = "", **kwargs) -> None:
-    """When a Hermes session ends, clean up stale SSH sessions."""
+
+def _on_session_end(session_id: str = "", **kwargs: Any) -> None:
     try:
-        active = sessions.list_sessions("active")
+        manager = _get_manager()
+        active = manager.list_sessions("active")
         if not active:
             return
-        # Kill sessions idle > 10 minutes at session end (conservative)
-        result = sessions.cleanup_idle(max_idle_minutes=10)
+        result = manager.cleanup_idle(max_idle_minutes=manager.config.session_end_idle_threshold)
         if result["count"] > 0:
             logger.info(
                 "ssh-tools: auto-cleaned %d idle session(s) on session end",
@@ -155,29 +145,35 @@ def _on_session_end(session_id: str = "", **kwargs) -> None:
 # Plugin registration
 # ---------------------------------------------------------------------------
 
-def register(ctx) -> None:
+
+def register(ctx: Any) -> None:
     """Register SSH tools with Hermes."""
+    global _manager
+    if _manager is not None:
+        logger.debug("ssh-tools: already registered, skipping")
+        return
+    _manager = SSHManager()
 
     # Tools
     ctx.register_tool(
         name="ssh_terminal",
         toolset="ssh_tools",
         schema=SSH_TERMINAL_SCHEMA,
-        handler=handle_ssh_terminal,
+        handler=handle_ssh_terminal(_manager),
         description="Run a command on a remote machine via SSH.",
     )
     ctx.register_tool(
         name="ssh_machines",
         toolset="ssh_tools",
         schema=SSH_MACHINES_SCHEMA,
-        handler=handle_ssh_machines,
+        handler=handle_ssh_machines(_manager),
         description="Manage the SSH machine registry.",
     )
     ctx.register_tool(
         name="ssh_sessions",
         toolset="ssh_tools",
         schema=SSH_SESSIONS_SCHEMA,
-        handler=handle_ssh_sessions,
+        handler=handle_ssh_sessions(_manager),
         description="Manage active SSH sessions.",
     )
 
@@ -191,7 +187,7 @@ def register(ctx) -> None:
         description="SSH session management — machines, sessions, idle alerts.",
     )
 
-    # Start idle checker (background thread)
-    sessions.start_idle_checker(interval=60, max_idle_minutes=30)
+    # Start background idle checker
+    _manager.start_idle_checker()
 
     logger.info("ssh-tools plugin loaded")
