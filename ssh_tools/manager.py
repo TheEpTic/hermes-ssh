@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -149,6 +150,7 @@ class SSHManager:
         self._lock = threading.Lock()
         self._checker_thread: threading.Thread | None = None
         self._checker_event = threading.Event()
+        self._config.ensure_dirs()
 
     @property
     def config(self) -> SSHConfig:
@@ -186,9 +188,8 @@ class SSHManager:
     # ----- Machine registry -----
 
     def _load_machines(self) -> dict[str, dict[str, Any]]:
-        raw: dict[str, Any] = self._read_json(self._config.machines_file, {"machines": {}})
-        result: dict[str, dict[str, Any]] = raw.get("machines", {})
-        return result
+        raw = self._read_json(self._config.machines_file, {"machines": {}})
+        return raw.get("machines", {})
 
     def _save_machines(self, machines: dict[str, dict[str, Any]]) -> None:
         self._write_json(self._config.machines_file, {"machines": machines})
@@ -209,7 +210,10 @@ class SSHManager:
         return None
 
     def resolve_name(self, name: str) -> str | None:
-        """Resolve a name or alias to canonical machine name."""
+        """Resolve a name or alias to canonical machine name.
+
+        Shared lookup used by get_machine, remove_machine, and run_command.
+        """
         machines = self._load_machines()
         if name in machines:
             return name
@@ -221,17 +225,7 @@ class SSHManager:
     def add_machine(self, machine: Machine) -> Machine:
         """Add or update a machine. Returns the stored machine."""
         if not machine.added:
-            machine = Machine(
-                name=machine.name,
-                host=machine.host,
-                user=machine.user,
-                port=machine.port,
-                key=machine.key,
-                aliases=machine.aliases,
-                tags=machine.tags,
-                description=machine.description,
-                added=datetime.now(UTC).isoformat(),
-            )
+            machine = replace(machine, added=datetime.now(UTC).isoformat())
         with self._lock:
             machines = self._load_machines()
             machines[machine.name] = machine.to_dict()
@@ -241,14 +235,11 @@ class SSHManager:
     def remove_machine(self, name: str) -> bool:
         with self._lock:
             machines = self._load_machines()
-            canonical = None
-            if name in machines:
-                canonical = name
-            else:
-                for mname, mdata in machines.items():
-                    if name in mdata.get("aliases", []):
-                        canonical = mname
-                        break
+            canonical = name if name in machines else next(
+                (mname for mname, mdata in machines.items()
+                 if name in mdata.get("aliases", [])),
+                None,
+            )
             if canonical and canonical in machines:
                 del machines[canonical]
                 self._save_machines(machines)
@@ -260,21 +251,7 @@ class SSHManager:
         if not machine:
             return {"success": False, "error": f"Machine '{name}' not found"}
 
-        cmd = [
-            "ssh",
-            "-o",
-            f"ConnectTimeout={self._config.connect_timeout}",
-            "-o",
-            f"StrictHostKeyChecking={self._config.strict_host_key_checking}",
-            "-o",
-            "BatchMode=yes",
-            "-p",
-            str(machine.port),
-        ]
-        if machine.key:
-            cmd.extend(["-i", machine.key])
-        cmd.append(f"{machine.user}@{machine.host}")
-        cmd.append("echo ok")
+        cmd = self._build_ssh_args(machine, "echo ok", timeout=self._config.connect_timeout)
 
         try:
             result = subprocess.run(
@@ -304,9 +281,8 @@ class SSHManager:
     # ----- Session tracking -----
 
     def _load_sessions(self) -> dict[str, dict[str, Any]]:
-        raw: dict[str, Any] = self._read_json(self._config.sessions_file, {"sessions": {}})
-        result: dict[str, dict[str, Any]] = raw.get("sessions", {})
-        return result
+        raw = self._read_json(self._config.sessions_file, {"sessions": {}})
+        return raw.get("sessions", {})
 
     def _save_sessions(self, sessions: dict[str, dict[str, Any]]) -> None:
         self._write_json(self._config.sessions_file, {"sessions": sessions})
@@ -328,11 +304,8 @@ class SSHManager:
     def register_session(self, session: Session) -> None:
         now = datetime.now(UTC).isoformat()
         if not session.started:
-            session = Session(
-                id=session.id,
-                machine=session.machine,
-                pid=session.pid,
-                control_path=session.control_path,
+            session = replace(
+                session,
                 started=now,
                 last_active=now,
                 command_count=0,
@@ -491,7 +464,6 @@ class SSHManager:
     ) -> dict[str, Any]:
         """Run a command on a remote machine via SSH."""
         timeout = timeout or self._config.command_timeout
-        self._config.ensure_dirs()
 
         canonical = self.resolve_name(machine_name)
         if not canonical:
@@ -555,7 +527,6 @@ class SSHManager:
             return
 
         def _loop() -> None:
-            self._checker_event.set()
             while not self._checker_event.is_set():
                 with contextlib.suppress(Exception):
                     self.cleanup_idle()

@@ -1,8 +1,4 @@
-"""Centralized configuration for ssh-tools plugin.
-
-Single source of truth for all paths, defaults, and settings.
-No other module should define paths or magic numbers directly.
-"""
+"""Centralized configuration for ssh-tools plugin."""
 
 from __future__ import annotations
 

@@ -5,7 +5,6 @@ Provides:
   - ssh_machines: Machine registry (add/list/remove/test/inspect)
   - ssh_sessions: Active session tracking (list/kill/cleanup)
   - /ssh slash command for quick access
-  - on_session_end hook for auto-cleanup of stale sessions
 """
 
 from __future__ import annotations
@@ -128,9 +127,6 @@ def _handle_slash(raw_args: str) -> str | None:
 def _on_session_end(session_id: str = "", **kwargs: Any) -> None:
     try:
         manager = _get_manager()
-        active = manager.list_sessions("active")
-        if not active:
-            return
         result = manager.cleanup_idle(max_idle_minutes=manager.config.session_end_idle_threshold)
         if result["count"] > 0:
             logger.info(
