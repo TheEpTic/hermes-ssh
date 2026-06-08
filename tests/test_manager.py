@@ -586,3 +586,450 @@ def test_start_idle_checker_idempotent(tmp_path: Path) -> None:
     mgr.start_idle_checker()  # Should be no-op
     assert mgr._checker_thread is thread1
     mgr.stop_idle_checker()
+
+
+# ---------------------------------------------------------------------------
+# Additional imports for new tests below
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch
+
+from ssh_tools.manager import SSHManager
+
+# ---------------------------------------------------------------------------
+# kill_session — PID + control socket
+# ---------------------------------------------------------------------------
+
+
+def test_kill_session_no_pid(tmp_path: Path) -> None:
+    """kill_session with pid=0 skips os.kill and still closes the session."""
+    mgr = _make_manager(tmp_path)
+    mgr.register_session(Session(id="s1", machine="h", pid=0))
+    result = mgr.kill_session("s1")
+    assert result["success"] is True
+    assert result["pid_killed"] is False
+    s = mgr.get_session("s1")
+    assert s is not None
+    assert s.status == "closed"
+
+
+def test_kill_session_with_pid_mocked(tmp_path: Path) -> None:
+    """Kill session with a real PID — mock os.kill to avoid actually killing."""
+    mgr = _make_manager(tmp_path)
+    mgr.register_session(Session(id="s1", machine="h", pid=99999))
+
+    with (
+        patch("ssh_tools.manager.os.kill") as mock_kill,
+        patch("ssh_tools.manager.time.sleep"),
+    ):
+        # First call (SIGTERM) succeeds, second (alive check) raises OSError = dead
+        mock_kill.side_effect = [None, OSError("No such process")]
+        result = mgr.kill_session("s1")
+
+    assert result["success"] is True
+    assert result["pid_killed"] is True
+    s = mgr.get_session("s1")
+    assert s is not None
+    assert s.status == "closed"
+
+
+def test_kill_session_real_machine_hostname_in_ssh_exit(tmp_path: Path) -> None:
+    """Verify hostname from machine registry is used in ssh -O exit command."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="prod", host="10.0.0.1", user="admin"))
+    # Create a fake control path file so os.path.exists returns True
+    ctrl = tmp_path / "prod.sock"
+    ctrl.touch()
+    mgr.register_session(Session(id="s1", machine="prod", pid=0, control_path=str(ctrl)))
+
+    with (
+        patch("ssh_tools.manager.subprocess.run") as mock_sub,
+        patch("ssh_tools.manager.os.kill"),
+    ):
+        mock_sub.return_value = MagicMock(returncode=0)
+        result = mgr.kill_session("s1")
+
+    assert result["success"] is True
+    assert result["socket_closed"] is True
+    # Verify the ssh command used the real hostname "10.0.0.1"
+    call_args = mock_sub.call_args
+    cmd = call_args[0][0]
+    assert cmd[0] == "ssh"
+    assert "10.0.0.1" in cmd
+
+
+def test_kill_session_socket_path_missing(tmp_path: Path) -> None:
+    """When control_path file doesn't exist, socket_closed is False."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr.register_session(Session(id="s1", machine="h", pid=0, control_path="/nonexistent.sock"))
+    result = mgr.kill_session("s1")
+    assert result["success"] is True
+    assert result["socket_closed"] is False
+
+
+def test_kill_session_nonexistent(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    result = mgr.kill_session("nope")
+    assert result["success"] is False
+    assert "not found" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# run_command — no lingering active sessions
+# ---------------------------------------------------------------------------
+
+
+def test_run_command_no_active_sessions_after(tmp_path: Path) -> None:
+    """After run_command completes, there should be no active sessions left."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="hello\n", stderr="")
+        result = mgr.run_command("h", "echo hello")
+
+    assert result["success"] is True
+    # The session was registered then immediately closed
+    active = mgr.list_sessions("active")
+    assert len(active) == 0
+
+
+# ---------------------------------------------------------------------------
+# cleanup_idle — batch close (single save)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_idle_batch_close_single_save(tmp_path: Path) -> None:
+    """cleanup_idle should close all idle sessions in one batch, not per-session."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    # Register two sessions, both old enough to be idle
+    mgr.register_session(Session(id="s1", machine="h", pid=101))
+    mgr.register_session(Session(id="s2", machine="h", pid=102))
+
+    # Age both sessions beyond threshold
+    with mgr._lock:
+        sessions = mgr._load_sessions()
+        old_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        sessions["s1"]["last_active"] = old_time
+        sessions["s2"]["last_active"] = old_time
+        mgr._save_sessions(sessions)
+
+    with (
+        patch("ssh_tools.manager.os.kill") as mock_kill,
+        patch("ssh_tools.manager.time.sleep"),
+    ):
+        mock_kill.side_effect = OSError("No such process")
+        result = mgr.cleanup_idle(max_idle_minutes=30)
+
+    assert result["count"] == 2
+    # Both sessions should be closed
+    s1 = mgr.get_session("s1")
+    assert s1 is not None
+    assert s1.status == "closed"
+    s2 = mgr.get_session("s2")
+    assert s2 is not None
+    assert s2.status == "closed"
+
+
+def test_cleanup_idle_empty_list(tmp_path: Path) -> None:
+    """No idle sessions → count 0, no errors."""
+    mgr = _make_manager(tmp_path)
+    result = mgr.cleanup_idle(max_idle_minutes=30)
+    assert result["count"] == 0
+    assert result["killed"] == []
+
+
+# ---------------------------------------------------------------------------
+# Background command — Popen path, poll_session, read_output
+# ---------------------------------------------------------------------------
+
+
+def _fake_running_popen() -> MagicMock:
+    """Create a mock Popen that is still running."""
+    proc = MagicMock()
+    proc.pid = 12345
+    proc.stdout = MagicMock()
+    proc.stderr = MagicMock()
+    proc.poll.return_value = None
+    proc.returncode = None
+    return proc
+
+
+def test_run_command_background(tmp_path: Path) -> None:
+    """background=True uses Popen and returns immediately."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        result = mgr.run_command("h", "long command", background=True)
+
+    assert result["success"] is True
+    assert result["background"] is True
+    assert result["pid"] == 12345
+    assert "session_id" in result
+    # Session should be registered (active, not closed)
+    session = mgr.get_session(result["session_id"])
+    assert session is not None
+    assert session.status == "active"
+
+
+def test_poll_session_running(tmp_path: Path) -> None:
+    """poll_session returns running=True when process is alive."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        result = mgr.run_command("h", "long cmd", background=True)
+
+    sid = result["session_id"]
+    poll_result = mgr.poll_session(sid)
+    assert poll_result["success"] is True
+    assert poll_result["running"] is True
+
+
+def test_poll_session_finished(tmp_path: Path) -> None:
+    """poll_session collects output when process finishes."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    # Start with running process
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        bg_result = mgr.run_command("h", "cmd", background=True)
+    sid = bg_result["session_id"]
+
+    # Now simulate the process has finished
+    fake_proc.poll.return_value = 0
+    fake_proc.stdout.read.return_value = b"hello world\n"
+    fake_proc.stderr.read.return_value = b""
+
+    poll_result = mgr.poll_session(sid)
+    assert poll_result["success"] is True
+    assert poll_result["running"] is False
+    assert poll_result["stdout"] == "hello world\n"
+    assert poll_result["exit_code"] == 0
+    # Process should be removed from internal tracking
+    assert sid not in mgr._processes
+    # Session should be closed
+    s = mgr.get_session(sid)
+    assert s is not None
+    assert s.status == "closed"
+
+
+def test_poll_session_nonexistent(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    result = mgr.poll_session("no_such_session")
+    assert result["success"] is False
+    assert "No background process" in result["error"]
+
+
+def test_read_output_finished(tmp_path: Path) -> None:
+    """read_output returns output from a finished background process."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        bg_result = mgr.run_command("h", "cmd", background=True)
+    sid = bg_result["session_id"]
+
+    # Simulate finished
+    fake_proc.poll.return_value = 1
+    fake_proc.stdout.read.return_value = b"some output"
+    fake_proc.stderr.read.return_value = b"err msg"
+
+    out = mgr.read_output(sid)
+    assert out["success"] is True
+    assert out["stdout"] == "some output"
+    assert out["stderr"] == "err msg"
+    assert out["exit_code"] == 1
+    assert sid not in mgr._processes
+
+
+def test_read_output_still_running(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        bg_result = mgr.run_command("h", "cmd", background=True)
+    sid = bg_result["session_id"]
+
+    result = mgr.read_output(sid)
+    assert result["success"] is False
+    assert "still running" in result["error"]
+
+
+def test_read_output_nonexistent(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    result = mgr.read_output("no_such_session")
+    assert result["success"] is False
+    assert "No background process" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Output truncation
+# ---------------------------------------------------------------------------
+
+
+def test_run_command_output_truncation(tmp_path: Path) -> None:
+    """stdout/stderr exceeding max_output_chars are truncated."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    big_stdout = "x" * 1000
+    big_stderr = "y" * 1000
+
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=big_stdout, stderr=big_stderr)
+        result = mgr.run_command("h", "cmd", max_output_chars=100)
+
+    assert result["success"] is True
+    assert len(result["stdout"]) < 1000
+    assert "truncated" in result["stdout"]
+    assert len(result["stderr"]) < 1000
+    assert "truncated" in result["stderr"]
+
+
+def test_run_command_no_truncation_short_output(tmp_path: Path) -> None:
+    """Short output is not truncated."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="hi\n", stderr="")
+        result = mgr.run_command("h", "echo hi")
+
+    assert result["stdout"] == "hi\n"
+    assert "truncated" not in result["stdout"]
+
+
+def test_truncate_output_static_method() -> None:
+    """Test the static truncation helper directly."""
+    short = SSHManager._truncate_output("hello", 100)
+    assert short == "hello"
+
+    long_text = "x" * 200
+    truncated = SSHManager._truncate_output(long_text, 50)
+    assert len(truncated) < 200
+    assert "truncated" in truncated
+    assert "200 total chars" in truncated
+
+
+# ---------------------------------------------------------------------------
+# Command audit log — JSONL written, list_command_log returns entries
+# ---------------------------------------------------------------------------
+
+
+def test_run_command_writes_audit_log(tmp_path: Path) -> None:
+    """After run_command, a JSONL entry should be in command_log.jsonl."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = mgr.run_command("h", "uptime")
+
+    assert result["success"] is True
+    log_path = tmp_path / "command_log.jsonl"
+    assert log_path.exists()
+    lines = log_path.read_text().strip().splitlines()
+    assert len(lines) >= 1
+    entry = json.loads(lines[-1])
+    assert entry["machine"] == "h"
+    assert entry["command"] == "uptime"
+    assert entry["exit_code"] == 0
+    assert "timestamp" in entry
+    assert "elapsed_secs" in entry
+    assert "session_id" in entry
+
+
+def test_list_command_log_entries(tmp_path: Path) -> None:
+    """list_command_log returns parsed entries from the JSONL file."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    # Run two commands
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "echo 1")
+        mgr.run_command("h", "echo 2")
+
+    entries = mgr.list_command_log()
+    assert len(entries) >= 2
+    assert entries[-1]["command"] == "echo 2"
+    assert entries[-2]["command"] == "echo 1"
+
+
+def test_list_command_log_limit(tmp_path: Path) -> None:
+    """list_command_log respects the limit parameter."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        for i in range(5):
+            mgr.run_command("h", f"cmd {i}")
+
+    entries = mgr.list_command_log(limit=3)
+    assert len(entries) == 3
+    assert entries[-1]["command"] == "cmd 4"
+
+
+def test_list_command_log_empty(tmp_path: Path) -> None:
+    """No log file → empty list."""
+    mgr = _make_manager(tmp_path)
+    assert mgr.list_command_log() == []
+
+
+def test_background_command_writes_audit_log(tmp_path: Path) -> None:
+    """Background commands also write to the audit log."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        mgr.run_command("h", "bg cmd", background=True)
+
+    log_path = tmp_path / "command_log.jsonl"
+    assert log_path.exists()
+    lines = log_path.read_text().strip().splitlines()
+    assert len(lines) >= 1
+    entry = json.loads(lines[-1])
+    assert entry["command"] == "bg cmd"
+    assert entry["exit_code"] is None  # Not finished yet
+
+
+# ---------------------------------------------------------------------------
+# Auto-prune in idle checker
+# ---------------------------------------------------------------------------
+
+
+def test_idle_checker_auto_prunes(tmp_path: Path) -> None:
+    """The idle checker should auto-prune old closed sessions."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    # Create an old closed session
+    mgr.register_session(Session(id="s_old", machine="h", pid=100))
+    mgr.close_session("s_old")
+
+    # Set started time to 48 hours ago so it exceeds prune threshold
+    with mgr._lock:
+        sessions = mgr._load_sessions()
+        old_time = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
+        sessions["s_old"]["started"] = old_time
+        mgr._save_sessions(sessions)
+
+    # Verify session exists before checker runs
+    assert mgr.get_session("s_old") is not None
+
+    # Run the prune directly (simulating what the checker does every 10 cycles)
+    count = mgr.prune_closed()
+    assert count == 1
+    assert mgr.get_session("s_old") is None

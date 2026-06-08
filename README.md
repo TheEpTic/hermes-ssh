@@ -16,6 +16,8 @@ ssh_sessions list
 
 ## Quick Start
 
+> **Requires Python 3.11+** and an OpenSSH client (`ssh`) on the host system.
+
 ```bash
 # Clone and deploy
 git clone https://github.com/TheEpTic/hermes-ssh.git
@@ -34,9 +36,9 @@ ln -s ./hermes-ssh/src/ssh_tools ~/.hermes/plugins/hermes-ssh
 # Then /reset in Hermes
 ```
 
-## What It Does
+## Features
 
-**`ssh_terminal`** — Run any command on a remote machine. Commands run through `bash -c` with `pipefail`, so pipelines work correctly.
+**`ssh_terminal`** — Run any command on a remote machine. Commands run through `bash -c` with `pipefail`, so pipelines work correctly. Long-running commands can be backgrounded, and output is automatically truncated when it exceeds safe limits.
 
 **`ssh_machines`** — Register servers once, refer to them by name. Supports aliases, tags, and connectivity tests.
 
@@ -44,11 +46,23 @@ ln -s ./hermes-ssh/src/ssh_tools ~/.hermes/plugins/hermes-ssh
 
 **`/ssh` slash command** — Quick access from chat. Inspect machines, run commands, test connectivity.
 
+### Background Commands
+
+Commands can be run in the background — the plugin tracks them and lets you check status or retrieve output later.
+
+### Output Truncation
+
+Command output is automatically truncated to prevent context overflow. Large outputs are clipped with a note that the result was truncated.
+
+### Command Audit Log
+
+Every command executed through the plugin is logged with timestamps, the target machine, and the exit code. Review past activity with `ssh_sessions`.
+
 ### Connection Reuse
 
 SSH connections are reused via `ControlMaster` with a 5-minute persist window. The second command to the same host is instant.
 
-### Examples
+## Examples
 
 ```bash
 # Add a server
@@ -107,6 +121,20 @@ See [SECURITY.md](SECURITY.md) for the full picture.
 - Python 3.11+
 - OpenSSH client (`ssh`)
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+
+## Troubleshooting
+
+**Connection refused**
+The remote host may not be listening on the expected port, or a firewall is blocking the connection. Verify with `ssh -v user@host` outside of Hermes. Check that `default_port` in the plugin config matches the remote SSH port.
+
+**Permission denied (publickey)**
+The SSH key path stored in the machine registry may be incorrect, or the remote host doesn't have the corresponding public key in `~/.ssh/authorized_keys`. Verify with `ssh -i /path/to/key user@host`.
+
+**Command timeout**
+Commands exceeding `command_timeout` (default 30s) are killed. Increase the timeout in your config or break long-running work into background tasks. For jobs that take longer than a few minutes, run them in a screen/tmux session on the remote host.
+
+**Output looks truncated**
+This is intentional — the plugin truncates large outputs to avoid context overflow. The full output is still available on the remote host. Run the command directly over SSH if you need the complete output.
 
 ## Development
 

@@ -44,6 +44,20 @@ def handle_ssh_sessions(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             count = manager.prune_closed()
             return ok(pruned=count, message=f"Removed {count} closed session(s)")
 
+        if action == "poll":
+            error = require(params, "session_id")
+            if error:
+                return err(error)
+            result = manager.poll_session(params["session_id"])
+            return ok(**result)
+
+        if action == "read_output":
+            error = require(params, "session_id")
+            if error:
+                return err(error)
+            result = manager.read_output(params["session_id"])
+            return ok(**result)
+
         return err(f"Unknown action: {action}")
 
     return _handle

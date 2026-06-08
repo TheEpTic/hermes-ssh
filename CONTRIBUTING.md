@@ -1,6 +1,6 @@
 # Contributing
 
-PRs welcome. Here's the workflow:
+PRs welcome. Here's the workflow.
 
 ## Setup
 
@@ -20,6 +20,26 @@ mypy src/ssh_tools/
 pytest
 ```
 
+## Testing
+
+Run the full test suite with:
+
+```bash
+pytest
+```
+
+For coverage:
+
+```bash
+pytest --cov=ssh_tools --cov-report=term-missing
+```
+
+Aim for **90%+ coverage** on new code. The test suite uses pytest fixtures defined in `tests/conftest.py` for mocking SSH connections and the manager. When adding a new tool or handler, write tests that cover:
+
+- Happy path (valid input, successful execution)
+- Error cases (missing params, connection failures, timeouts)
+- Edge cases (empty output, very large output, special characters)
+
 ## Guidelines
 
 - **Tests required for bug fixes.** Each fix gets a test that reproduces the issue.
@@ -32,18 +52,17 @@ pytest
 src/ssh_tools/
 ├── __init__.py          # Plugin registration + Hermes hooks
 ├── config.py            # SSHConfig dataclass (all settings)
-├── core/
-│   ├── manager.py       # SSHManager — machines, sessions, execution
-│   └── ...
-├── handlers/
-│   ├── terminal.py      # ssh_terminal tool handler
-│   ├── machines.py      # ssh_machines tool handler
-│   ├── sessions.py      # ssh_sessions tool handler
-│   └── slash.py         # /ssh slash command
+├── manager.py           # SSHManager — machines, sessions, execution
 ├── models.py            # Machine, Session dataclasses
 ├── schemas.py           # Tool schemas (what the LLM sees)
 ├── utils.py             # Shared helpers (ok/err response builders)
-└── plugin.yaml          # Plugin manifest
+├── py.typed             # PEP 561 marker
+└── handlers/
+    ├── __init__.py
+    ├── terminal.py      # ssh_terminal tool handler
+    ├── machines.py      # ssh_machines tool handler
+    ├── sessions.py      # ssh_sessions tool handler
+    └── slash.py         # /ssh slash command
 tests/
 ├── conftest.py          # Shared fixtures
 ├── test_config.py

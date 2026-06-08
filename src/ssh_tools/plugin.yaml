@@ -1,6 +1,0 @@
-# hermes-ssh — Hermes SSH management plugin
-name: hermes-ssh
-version: 0.1.0
-description: "SSH remote execution for Hermes Agent — machine registry, session tracking, and a proper ssh_terminal tool."
-author: TheEpTic
-hooks: []

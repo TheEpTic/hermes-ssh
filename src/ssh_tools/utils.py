@@ -22,7 +22,7 @@ def require(params: dict[str, Any], *fields: str) -> str | None:
     Returns error message string if any field is missing, None if all ok.
     """
     for field in fields:
-        if not params.get(field):
+        if field not in params or params[field] is None:
             labels = {
                 "machine": "machine",
                 "command": "command",

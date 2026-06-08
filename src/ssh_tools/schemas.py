@@ -24,6 +24,24 @@ SSH_TERMINAL_SCHEMA = {
                 "description": "Force a new connection instead of reusing existing (default: false)",
                 "default": False,
             },
+            "background": {
+                "type": "boolean",
+                "description": "Run in background and return immediately. Use ssh_sessions to poll/read output.",
+                "default": False,
+            },
+            "max_output_chars": {
+                "type": "integer",
+                "description": "Max output characters to return. Truncated if exceeded (default: 50000).",
+                "default": 50000,
+            },
+            "poll": {
+                "type": "string",
+                "description": "Poll a background session for status",
+            },
+            "read_output": {
+                "type": "string",
+                "description": "Read output from a completed background session",
+            },
         },
         "required": ["machine", "command"],
     },
@@ -85,13 +103,13 @@ SSH_MACHINES_SCHEMA = {
 
 SSH_SESSIONS_SCHEMA = {
     "name": "ssh_sessions",
-    "description": "Manage active SSH sessions. List, kill, or cleanup idle sessions.",
+    "description": "Manage active SSH sessions. List, kill, cleanup, poll, or read output.",
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "kill", "cleanup", "prune"],
+                "enum": ["list", "kill", "cleanup", "prune", "poll", "read_output"],
                 "description": "Action to perform",
             },
             "session_id": {

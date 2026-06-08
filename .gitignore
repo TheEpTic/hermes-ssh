@@ -22,3 +22,6 @@ build/
 # Runtime data (persisted locally, not tracked)
 data/
 sockets/
+
+# Lock files
+uv.lock

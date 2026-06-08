@@ -16,9 +16,15 @@ Subcommands:
   (no args)              List machines and active sessions
   <machine>              Show machine details
   <machine> <command>    Run command on machine
+  <machine> -bg <cmd>    Run command in background
   test                   Test connectivity to all machines
   cleanup                Kill all idle sessions (>30 min)
   help                   Show this help
+
+Background commands:
+  Use ssh_terminal with background=true to run long commands.
+  Output is truncated to max_output_lines (default: 500).
+  Use ssh_sessions poll/read_output to check status and get results.
 """
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import ssh_tools
 from ssh_tools.handlers import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
@@ -275,3 +276,159 @@ def test_slash_inspect_by_alias(tmp_path: Path) -> None:
     result = _handle_slash("h1")
     assert result is not None
     assert "host1" in result
+
+
+# ---------------------------------------------------------------------------
+# ssh_terminal -- background, poll, read_output
+# ---------------------------------------------------------------------------
+
+
+def _fake_running_popen() -> MagicMock:
+    """Create a mock Popen that is still running."""
+    proc = MagicMock()
+    proc.pid = 12345
+    proc.stdout = MagicMock()
+    proc.stderr = MagicMock()
+    proc.poll.return_value = None
+    proc.returncode = None
+    return proc
+
+
+def test_ssh_terminal_background(tmp_path: Path) -> None:
+    """ssh_terminal with background=True returns session info immediately."""
+    from unittest.mock import patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        result = json.loads(handler({"machine": "h", "command": "sleep 10", "background": True}))
+
+    assert result["success"] is True
+    assert result["session_id"] is not None
+    assert result["pid"] == 12345
+    assert result["status"] == "running"
+
+
+def test_ssh_terminal_poll(tmp_path: Path) -> None:
+    """ssh_terminal poll param checks background session status."""
+    from unittest.mock import patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        start = json.loads(handler({"machine": "h", "command": "cmd", "background": True}))
+    sid = start["session_id"]
+
+    # Still running
+    result = json.loads(handler({"machine": "h", "command": "", "poll": sid}))
+    assert result["success"] is True
+    assert result["running"] is True
+
+    # Now finished
+    fake_proc.poll.return_value = 0
+    fake_proc.stdout.read.return_value = b"done"
+    fake_proc.stderr.read.return_value = b""
+    result = json.loads(handler({"machine": "h", "command": "", "poll": sid}))
+    assert result["success"] is True
+    assert result["running"] is False
+    assert result["exit_code"] == 0
+
+
+def test_ssh_terminal_read_output(tmp_path: Path) -> None:
+    """ssh_terminal read_output param reads completed background output."""
+    from unittest.mock import patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        start = json.loads(handler({"machine": "h", "command": "cmd", "background": True}))
+    sid = start["session_id"]
+
+    fake_proc.poll.return_value = 0
+    fake_proc.stdout.read.return_value = b"result data"
+    fake_proc.stderr.read.return_value = b""
+
+    out_result = json.loads(handler({"machine": "h", "command": "", "read_output": sid}))
+    assert out_result["success"] is True
+    assert out_result["stdout"] == "result data"
+
+
+# ---------------------------------------------------------------------------
+# ssh_sessions -- poll action
+# ---------------------------------------------------------------------------
+
+
+def test_sessions_poll(tmp_path: Path) -> None:
+    """ssh_sessions poll action checks a background session."""
+    from unittest.mock import patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_sessions(mgr)
+    term_handler = handle_ssh_terminal(mgr)
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        start = json.loads(term_handler({"machine": "h", "command": "cmd", "background": True}))
+    sid = start["session_id"]
+
+    result = json.loads(handler({"action": "poll", "session_id": sid}))
+    assert result["success"] is True
+    assert result["running"] is True
+
+
+def test_sessions_poll_missing_id(tmp_path: Path) -> None:
+    handler = handle_ssh_sessions(_make_manager(tmp_path))
+    result = json.loads(handler({"action": "poll"}))
+    assert result["success"] is False
+    assert "session_id is required" in result["error"]
+
+
+def test_sessions_poll_nonexistent(tmp_path: Path) -> None:
+    handler = handle_ssh_sessions(_make_manager(tmp_path))
+    result = json.loads(handler({"action": "poll", "session_id": "nope"}))
+    assert result["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# ssh_sessions -- read_output action
+# ---------------------------------------------------------------------------
+
+
+def test_sessions_read_output(tmp_path: Path) -> None:
+    """ssh_sessions read_output reads from a completed background session."""
+    from unittest.mock import patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_sessions(mgr)
+    term_handler = handle_ssh_terminal(mgr)
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        start = json.loads(term_handler({"machine": "h", "command": "cmd", "background": True}))
+    sid = start["session_id"]
+
+    fake_proc.poll.return_value = 0
+    fake_proc.stdout.read.return_value = b"output here"
+    fake_proc.stderr.read.return_value = b""
+
+    result = json.loads(handler({"action": "read_output", "session_id": sid}))
+    assert result["success"] is True
+    assert result["stdout"] == "output here"
+
+
+def test_sessions_read_output_missing_id(tmp_path: Path) -> None:
+    handler = handle_ssh_sessions(_make_manager(tmp_path))
+    result = json.loads(handler({"action": "read_output"}))
+    assert result["success"] is False
+    assert "session_id is required" in result["error"]

@@ -46,11 +46,16 @@ class SSHManager:
         self._lock = threading.Lock()
         self._checker_thread: threading.Thread | None = None
         self._checker_event = threading.Event()
+        self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._config.ensure_dirs()
 
     @property
     def config(self) -> SSHConfig:
         return self._config
+
+    @property
+    def _audit_log_path(self) -> Path:
+        return self._config.data_dir / "command_log.jsonl"
 
     # ----- JSON persistence -----
 
@@ -132,7 +137,14 @@ class SSHManager:
     def remove_machine(self, name: str) -> bool:
         with self._lock:
             machines = self._load_machines()
-            canonical = self.resolve_name(name)
+            canonical = (
+                name
+                if name in machines
+                else next(
+                    (mn for mn, md in machines.items() if name in md.get("aliases", [])),
+                    "",
+                )
+            )
             if canonical and canonical in machines:
                 del machines[canonical]
                 self._save_machines(machines)
@@ -263,9 +275,23 @@ class SSHManager:
 
         # Close control socket
         if session.control_path and os.path.exists(session.control_path):
+            hostname = None
+            try:
+                machine = self.get_machine(session.machine)
+                if machine:
+                    hostname = machine.host
+            except Exception:
+                pass
             try:
                 subprocess.run(
-                    ["ssh", "-O", "exit", "-o", f"ControlPath={session.control_path}", "dummy"],
+                    [
+                        "ssh",
+                        "-O",
+                        "exit",
+                        "-o",
+                        f"ControlPath={session.control_path}",
+                        hostname or "dummy",
+                    ],
                     capture_output=True,
                     timeout=5,
                 )
@@ -280,13 +306,70 @@ class SSHManager:
         """Kill all sessions idle for more than max_idle_minutes."""
         threshold = (max_idle_minutes or self._config.idle_timeout_minutes) * 60
         active = self.list_sessions("active")
-        killed = []
+        # Collect IDs of sessions that need killing (single read pass)
+        to_kill = []
         for sid, session in active.items():
             idle = session.idle_seconds
             if idle is not None and idle > threshold:
-                result = self.kill_session(sid)
-                killed.append({"session_id": sid, "machine": session.machine, **result})
+                to_kill.append(sid)
+
+        # Kill processes and close control sockets (no session file reloads)
+        killed: list[dict[str, Any]] = []
+        for sid in to_kill:
+            session = active[sid]
+            result: dict[str, Any] = {"pid_killed": False, "socket_closed": False}
+            # Kill the SSH process
+            if session.pid:
+                try:
+                    os.kill(session.pid, signal.SIGTERM)
+                    time.sleep(0.5)
+                    try:
+                        os.kill(session.pid, 0)
+                        os.kill(session.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    result["pid_killed"] = True
+                except OSError:
+                    result["pid_killed"] = True  # Already dead
+            # Close control socket
+            if session.control_path and os.path.exists(session.control_path):
+                try:
+                    machine = self.get_machine(session.machine)
+                    hostname = machine.host if machine else "dummy"
+                except Exception:
+                    hostname = "dummy"
+                try:
+                    subprocess.run(
+                        [
+                            "ssh",
+                            "-O",
+                            "exit",
+                            "-o",
+                            f"ControlPath={session.control_path}",
+                            hostname,
+                        ],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    result["socket_closed"] = True
+                except Exception:
+                    pass
+            killed.append({"session_id": sid, "machine": session.machine, **result})
+
+        # Batch close all sessions in one save
+        self._close_sessions_batch(to_kill)
         return {"killed": killed, "count": len(killed)}
+
+    def _close_sessions_batch(self, session_ids: list[str]) -> None:
+        """Mark multiple sessions as closed in a single file write."""
+        if not session_ids:
+            return
+        with self._lock:
+            sessions = self._load_sessions()
+            for sid in session_ids:
+                if sid in sessions:
+                    sessions[sid]["status"] = "closed"
+            self._save_sessions(sessions)
 
     def prune_closed(self, max_age_hours: int | None = None) -> int:
         """Remove closed sessions older than max_age_hours."""
@@ -361,23 +444,63 @@ class SSHManager:
         command: str,
         timeout: int | None = None,
         new_session: bool = False,
+        background: bool = False,
+        max_output_chars: int = 50_000,
     ) -> dict[str, Any]:
-        """Run a command on a remote machine via SSH."""
+        """Run a command on a remote machine via SSH.
+
+        Args:
+            machine_name: Name or alias of the target machine.
+            command: Shell command to execute remotely.
+            timeout: Override for the command timeout (seconds).
+            new_session: If True, skip SSH multiplexing / control socket.
+            background: If True, launch via Popen and return immediately.
+            max_output_chars: Truncate stdout/stderr beyond this length.
+        """
         timeout = timeout or self._config.command_timeout
 
-        canonical = self.resolve_name(machine_name)
-        if not canonical:
-            return {"success": False, "error": f"Machine '{machine_name}' not found in registry."}
-
-        machine = self.get_machine(canonical)
+        machine = self.get_machine(machine_name)
         if not machine:
             return {"success": False, "error": f"Machine '{machine_name}' not found."}
+
+        canonical = machine.name
 
         session_id = f"ssh_{canonical}_{uuid.uuid4().hex[:8]}"
         control_path = "" if new_session else str(self._config.socket_dir / f"{canonical}.sock")
         ssh_args = self._build_ssh_args(machine, command, control_path, timeout)
 
         start_time = time.monotonic()
+
+        # ---- background path ----
+        if background:
+            try:
+                proc = subprocess.Popen(
+                    ssh_args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self._processes[session_id] = proc
+                self.register_session(
+                    Session(
+                        id=session_id, machine=canonical, pid=proc.pid, control_path=control_path
+                    )
+                )
+                elapsed = round(time.monotonic() - start_time, 2)
+                self._log_command(
+                    canonical, command, exit_code=None, elapsed=elapsed, session_id=session_id
+                )
+                return {
+                    "success": True,
+                    "background": True,
+                    "pid": proc.pid,
+                    "machine": canonical,
+                    "session_id": session_id,
+                }
+            except Exception as e:
+                logger.debug("run_command (bg) failed for %s: %s", canonical, e, exc_info=True)
+                return {"success": False, "error": str(e), "exit_code": -1, "machine": canonical}
+
+        # ---- synchronous path ----
         try:
             result = subprocess.run(
                 ssh_args,
@@ -387,15 +510,14 @@ class SSHManager:
             )
             elapsed = round(time.monotonic() - start_time, 2)
 
-            self.register_session(
-                Session(id=session_id, machine=canonical, pid=0, control_path=control_path)
-            )
-            self.close_session(session_id)
+            stdout = self._truncate_output(result.stdout, max_output_chars)
+            stderr = self._truncate_output(result.stderr, max_output_chars)
 
+            self._log_command(canonical, command, result.returncode, elapsed, session_id)
             return {
                 "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stdout": stdout,
+                "stderr": stderr,
                 "exit_code": result.returncode,
                 "elapsed_secs": elapsed,
                 "machine": canonical,
@@ -404,10 +526,9 @@ class SSHManager:
 
         except subprocess.TimeoutExpired:
             elapsed = round(time.monotonic() - start_time, 2)
-            self.register_session(
-                Session(id=session_id, machine=canonical, pid=0, control_path=control_path)
+            self._log_command(
+                canonical, command, exit_code=-1, elapsed=elapsed, session_id=session_id
             )
-            self.close_session(session_id)
             return {
                 "success": False,
                 "error": f"Command timed out after {timeout}s",
@@ -418,7 +539,119 @@ class SSHManager:
             }
         except Exception as e:
             logger.debug("run_command failed for %s: %s", canonical, e, exc_info=True)
+            elapsed = round(time.monotonic() - start_time, 2)
+            self._log_command(
+                canonical, command, exit_code=-1, elapsed=elapsed, session_id=session_id
+            )
             return {"success": False, "error": str(e), "exit_code": -1, "machine": canonical}
+
+    # ----- Output helpers -----
+
+    @staticmethod
+    def _truncate_output(text: str, max_chars: int) -> str:
+        """Return *text* unchanged if within *max_chars*, else truncate and annotate."""
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + f"\n[truncated \u2014 {len(text)} total chars]"
+
+    # ----- Background process helpers -----
+
+    def poll_session(self, session_id: str) -> dict[str, Any]:
+        """Check if a background process is still running.
+
+        Returns a dict with ``running`` (bool) and, when the process has
+        finished, the collected stdout/stderr plus the exit code.
+        """
+        proc = self._processes.get(session_id)
+        if proc is None:
+            return {"success": False, "error": f"No background process for session '{session_id}'"}
+        exit_code = proc.poll()
+        if exit_code is None:
+            return {"success": True, "session_id": session_id, "running": True}
+        # Process finished — collect output
+        stdout = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
+        stderr = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
+        self._processes.pop(session_id, None)
+        self.close_session(session_id)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "running": False,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+        }
+
+    def read_output(self, session_id: str) -> dict[str, Any]:
+        """Read stdout/stderr from a completed background process.
+
+        Unlike :meth:`poll_session` this does **not** check whether the
+        process is still running — it is intended for callers who already
+        know the process has finished.
+        """
+        proc = self._processes.get(session_id)
+        if proc is None:
+            return {"success": False, "error": f"No background process for session '{session_id}'"}
+        exit_code = proc.poll()
+        if exit_code is None:
+            return {
+                "success": False,
+                "error": f"Process for session '{session_id}' is still running",
+            }
+        stdout = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
+        stderr = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
+        self._processes.pop(session_id, None)
+        self.close_session(session_id)
+        return {
+            "success": True,
+            "session_id": session_id,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+        }
+
+    # ----- Audit log -----
+
+    def _log_command(
+        self,
+        machine: str,
+        command: str,
+        exit_code: int | None,
+        elapsed: float,
+        session_id: str,
+    ) -> None:
+        """Append a single JSONL line to the command audit log."""
+        entry = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "machine": machine,
+            "command": command,
+            "exit_code": exit_code,
+            "elapsed_secs": elapsed,
+            "session_id": session_id,
+        }
+        try:
+            self._config.data_dir.mkdir(parents=True, exist_ok=True)
+            with self._audit_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except OSError:
+            logger.debug("Failed to append to audit log %s", self._audit_log_path, exc_info=True)
+
+    def list_command_log(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the last *limit* entries from the command audit log."""
+        if not self._audit_log_path.exists():
+            return []
+        lines = self._audit_log_path.read_text(encoding="utf-8").splitlines()
+        tail = lines[-limit:]
+        entries: list[dict[str, Any]] = []
+        for line in tail:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                entries.append(json.loads(stripped))
+            except json.JSONDecodeError:
+                continue
+        return entries
 
     # ----- Background idle checker -----
 
@@ -426,10 +659,18 @@ class SSHManager:
         if self._checker_thread is not None and self._checker_thread.is_alive():
             return
 
+        _prune_counter: list[int] = [0]  # mutable counter shared by closure
+        _PRUNE_EVERY = 10  # prune every 10 idle-check cycles
+
         def _loop() -> None:
             while not self._checker_event.is_set():
                 with contextlib.suppress(Exception):
                     self.cleanup_idle()
+                _prune_counter[0] += 1
+                if _prune_counter[0] >= _PRUNE_EVERY:
+                    _prune_counter[0] = 0
+                    with contextlib.suppress(Exception):
+                        self.prune_closed()
                 time.sleep(self._config.idle_check_interval)
 
         self._checker_event.clear()
