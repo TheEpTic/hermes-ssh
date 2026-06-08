@@ -92,6 +92,7 @@ ignore = [
     "ARG001", # **kwargs unused is fine for handler signature
     "N806",   # _PRUNE_EVERY constant style is fine
     "PLW2901", # loop var overwrite is fine (strip pattern)
+    "S108",    # /tmp paths are intentional
 ]
 
 [tool.ruff.lint.per-file-ignores]

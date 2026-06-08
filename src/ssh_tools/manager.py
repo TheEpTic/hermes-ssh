@@ -19,10 +19,8 @@ import time
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import Any
 
 from .config import DEFAULT_CONFIG, SSHConfig
 from .models import Machine, Session
@@ -232,7 +230,14 @@ class SSHManager:
                 )
                 self._save_sessions(sessions)
 
+    def _cleanup_output_files(self, session_id: str) -> None:
+        """Remove any /tmp/ output files saved for this session."""
+        for p in Path("/tmp").glob(f"ssh_output_{session_id}_*.txt"):
+            with contextlib.suppress(OSError):
+                p.unlink()
+
     def close_session(self, session_id: str) -> None:
+        self._cleanup_output_files(session_id)
         with self._lock:
             sessions = self._load_sessions()
             if session_id in sessions:
@@ -510,11 +515,15 @@ class SSHManager:
             )
             elapsed = round(time.monotonic() - start_time, 2)
 
-            stdout = self._truncate_output(result.stdout, max_output_chars)
-            stderr = self._truncate_output(result.stderr, max_output_chars)
+            stdout, stdout_file = self._maybe_save_output(
+                result.stdout, max_output_chars, session_id, "stdout"
+            )
+            stderr, stderr_file = self._maybe_save_output(
+                result.stderr, max_output_chars, session_id, "stderr"
+            )
 
             self._log_command(canonical, command, result.returncode, elapsed, session_id)
-            return {
+            resp: dict[str, Any] = {
                 "success": result.returncode == 0,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -523,6 +532,11 @@ class SSHManager:
                 "machine": canonical,
                 "session_id": session_id,
             }
+            if stdout_file:
+                resp["stdout_file"] = stdout_file
+            if stderr_file:
+                resp["stderr_file"] = stderr_file
+            return resp
 
         except subprocess.TimeoutExpired:
             elapsed = round(time.monotonic() - start_time, 2)
@@ -547,12 +561,26 @@ class SSHManager:
 
     # ----- Output helpers -----
 
-    @staticmethod
-    def _truncate_output(text: str, max_chars: int) -> str:
-        """Return *text* unchanged if within *max_chars*, else truncate and annotate."""
+    def _maybe_save_output(
+        self, text: str, max_chars: int, session_id: str, stream: str
+    ) -> tuple[str, str | None]:
+        """Return *(text_or_summary, file_path_or_None).
+
+        If *text* fits within *max_chars* it is returned unchanged.
+        Otherwise the full output is written to a ``/tmp/`` file and a
+        short summary is returned — the caller should include the file
+        path in its response so the LLM can ``read_file`` the rest.
+        """
         if len(text) <= max_chars:
-            return text
-        return text[:max_chars] + f"\n[truncated \u2014 {len(text)} total chars]"
+            return text, None
+        path = Path(f"/tmp/ssh_output_{session_id}_{stream}.txt")
+        path.write_text(text, encoding="utf-8")
+        summary = (
+            f"[output saved to {path} — {len(text):,} chars total, "
+            f"first {max_chars:,} shown below]\n"
+            f"{text[:max_chars]}"
+        )
+        return summary, str(path)
 
     # ----- Background process helpers -----
 
@@ -569,11 +597,14 @@ class SSHManager:
         if exit_code is None:
             return {"success": True, "session_id": session_id, "running": True}
         # Process finished — collect output
-        stdout = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
-        stderr = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
+        stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
+        stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
+        max_chars = self._config.max_output_chars
+        stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
+        stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
         self._processes.pop(session_id, None)
         self.close_session(session_id)
-        return {
+        resp: dict[str, Any] = {
             "success": True,
             "session_id": session_id,
             "running": False,
@@ -581,6 +612,11 @@ class SSHManager:
             "stderr": stderr,
             "exit_code": exit_code,
         }
+        if stdout_file:
+            resp["stdout_file"] = stdout_file
+        if stderr_file:
+            resp["stderr_file"] = stderr_file
+        return resp
 
     def read_output(self, session_id: str) -> dict[str, Any]:
         """Read stdout/stderr from a completed background process.
@@ -598,17 +634,25 @@ class SSHManager:
                 "success": False,
                 "error": f"Process for session '{session_id}' is still running",
             }
-        stdout = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
-        stderr = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
+        stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
+        stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
+        max_chars = self._config.max_output_chars
+        stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
+        stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
         self._processes.pop(session_id, None)
         self.close_session(session_id)
-        return {
+        resp2: dict[str, Any] = {
             "success": True,
             "session_id": session_id,
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
         }
+        if stdout_file:
+            resp2["stdout_file"] = stdout_file
+        if stderr_file:
+            resp2["stderr_file"] = stderr_file
+        return resp2
 
     # ----- Audit log -----
 

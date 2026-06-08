@@ -24,6 +24,9 @@ class SSHConfig:
     command_timeout: int = 30
     strict_host_key_checking: str = "no"
 
+    # Output
+    max_output_chars: int = 50_000  # save to /tmp/ file if exceeded
+
     # Session management
     idle_check_interval: int = 60  # seconds between idle checks
     idle_timeout_minutes: int = 30  # auto-kill after this

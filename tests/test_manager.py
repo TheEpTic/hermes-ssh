@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from ssh_tools.models import Machine, Session
 
 from .conftest import _make_manager
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # Machine dataclass
@@ -873,12 +869,12 @@ def test_read_output_nonexistent(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Output truncation
+# Output save-to-file (Hermes pattern)
 # ---------------------------------------------------------------------------
 
 
-def test_run_command_output_truncation(tmp_path: Path) -> None:
-    """stdout/stderr exceeding max_output_chars are truncated."""
+def test_run_command_large_output_saves_to_file(tmp_path: Path) -> None:
+    """stdout/stderr exceeding max_output_chars are saved to /tmp/ files."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
 
@@ -890,14 +886,19 @@ def test_run_command_output_truncation(tmp_path: Path) -> None:
         result = mgr.run_command("h", "cmd", max_output_chars=100)
 
     assert result["success"] is True
-    assert len(result["stdout"]) < 1000
-    assert "truncated" in result["stdout"]
-    assert len(result["stderr"]) < 1000
-    assert "truncated" in result["stderr"]
+    # Summary returned inline
+    assert "output saved to" in result["stdout"]
+    assert "stdout_file" in result
+    assert "stderr_file" in result
+    assert result["stdout_file"].endswith("_stdout.txt")
+    assert result["stderr_file"].endswith("_stderr.txt")
+    # Full output written to file
+    saved = Path(result["stdout_file"]).read_text()
+    assert saved == big_stdout
 
 
-def test_run_command_no_truncation_short_output(tmp_path: Path) -> None:
-    """Short output is not truncated."""
+def test_run_command_short_output_inline_no_file(tmp_path: Path) -> None:
+    """Short output stays inline, no file created."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
 
@@ -906,19 +907,28 @@ def test_run_command_no_truncation_short_output(tmp_path: Path) -> None:
         result = mgr.run_command("h", "echo hi")
 
     assert result["stdout"] == "hi\n"
-    assert "truncated" not in result["stdout"]
+    assert "stdout_file" not in result
+    assert "stderr_file" not in result
 
 
-def test_truncate_output_static_method() -> None:
-    """Test the static truncation helper directly."""
-    short = SSHManager._truncate_output("hello", 100)
-    assert short == "hello"
+def test_maybe_save_output_short() -> None:
+    """_maybe_save_output returns text unchanged for short input."""
+    mgr = SSHManager.__new__(SSHManager)
+    text, path = mgr._maybe_save_output("hello", 100, "s1", "stdout")
+    assert text == "hello"
+    assert path is None
 
-    long_text = "x" * 200
-    truncated = SSHManager._truncate_output(long_text, 50)
-    assert len(truncated) < 200
-    assert "truncated" in truncated
-    assert "200 total chars" in truncated
+
+def test_maybe_save_output_long() -> None:
+    """_maybe_save_output writes to /tmp/ and returns summary."""
+    mgr = SSHManager.__new__(SSHManager)
+    long_text = "x" * 500
+    text, path = mgr._maybe_save_output(long_text, 100, "s1", "stdout")
+    assert path is not None
+    assert "/tmp/ssh_output_s1_stdout.txt" in path
+    assert "output saved to" in text
+    assert "500 chars total" in text
+    assert len(text) < 500  # summary is shorter than full
 
 
 # ---------------------------------------------------------------------------
