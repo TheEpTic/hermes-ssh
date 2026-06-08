@@ -1050,6 +1050,7 @@ def test_idle_checker_auto_prunes(tmp_path: Path) -> None:
 
 # ---- Bug fix: machine name validation ----
 
+
 def test_validate_machine_name_valid() -> None:
     assert SSHManager._validate_machine_name("myserver") is None
     assert SSHManager._validate_machine_name("web-01") is None
@@ -1073,6 +1074,7 @@ def test_add_machine_rejects_bad_name(tmp_path: Path) -> None:
 
 # ---- Bug fix: /tmp output file permissions ----
 
+
 def test_maybe_save_output_permissions(tmp_path: Path) -> None:
     """Output files saved to /tmp should be 0o600 (owner-only)."""
     mgr = _make_manager(tmp_path)
@@ -1087,6 +1089,7 @@ def test_maybe_save_output_permissions(tmp_path: Path) -> None:
 
 
 # ---- Bug fix: structure validation ----
+
 
 def test_load_machines_corrupt_structure(tmp_path: Path) -> None:
     """Corrupt machines.json with wrong structure should not crash."""
@@ -1105,6 +1108,7 @@ def test_load_sessions_corrupt_structure(tmp_path: Path) -> None:
 
 
 # ---- Bug fix: timeout type safety ----
+
 
 def test_run_command_timeout_type_coercion(tmp_path: Path) -> None:
     """String timeout should be coerced to int, not crash."""
@@ -1128,6 +1132,7 @@ def test_run_command_zero_timeout_uses_default(tmp_path: Path) -> None:
 
 # ---- Bug fix: _close_sessions_batch cleans /tmp ----
 
+
 def test_close_sessions_batch_cleans_tmp(tmp_path: Path) -> None:
     """Batch-closed sessions should have their /tmp output files cleaned."""
     mgr = _make_manager(tmp_path)
@@ -1143,9 +1148,11 @@ def test_close_sessions_batch_cleans_tmp(tmp_path: Path) -> None:
 
 # ---- Bug fix: startup temp cleanup ----
 
+
 def test_ensure_dirs_cleans_orphaned_tmp(tmp_path: Path) -> None:
     """ensure_dirs should clean orphaned .tmp files from data_dir."""
     from ssh_tools.config import SSHConfig
+
     config = SSHConfig(data_dir=tmp_path)
     (tmp_path / "machines_abc.tmp").write_text("old")
     (tmp_path / "sessions_def.tmp").write_text("old")
@@ -1156,15 +1163,19 @@ def test_ensure_dirs_cleans_orphaned_tmp(tmp_path: Path) -> None:
 
 # ---- Bug fix: prune_closed handles naive datetime ----
 
+
 def test_prune_closed_naive_datetime(tmp_path: Path) -> None:
     """Sessions with naive timestamps should be pruned, not skipped."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     sessions = {
         "s_naive": {
-            "id": "s_naive", "machine": "h", "status": "closed",
+            "id": "s_naive",
+            "machine": "h",
+            "status": "closed",
             "started": "2020-01-01T00:00:00",
-            "last_active": "2020-01-01T00:00:00", "command_count": 0,
+            "last_active": "2020-01-01T00:00:00",
+            "command_count": 0,
         }
     }
     mgr._write_json(mgr._config.sessions_file, {"sessions": sessions})
@@ -1173,6 +1184,7 @@ def test_prune_closed_naive_datetime(tmp_path: Path) -> None:
 
 
 # ---- Bug fix: background session registration order ----
+
 
 def test_background_session_registered_before_process(tmp_path: Path) -> None:
     """Session should be in JSON before process is in _processes dict."""

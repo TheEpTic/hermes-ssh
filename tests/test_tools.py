@@ -436,9 +436,11 @@ def test_sessions_read_output_missing_id(tmp_path: Path) -> None:
 
 # ---- Bug fix: poll/read_output without machine/command ----
 
+
 def test_ssh_terminal_poll_without_machine(tmp_path: Path) -> None:
     """poll should work without machine/command"""
     from ssh_tools.handlers.terminal import handle_ssh_terminal
+
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     with patch("ssh_tools.manager.subprocess.Popen") as mock_popen:
@@ -446,7 +448,9 @@ def test_ssh_terminal_poll_without_machine(tmp_path: Path) -> None:
         proc.pid = 12345
         proc.poll.return_value = None
         mock_popen.return_value = proc
-        bg = json.loads(handle_ssh_terminal(mgr)({"machine": "h", "command": "sleep 99", "background": True}))
+        bg = json.loads(
+            handle_ssh_terminal(mgr)({"machine": "h", "command": "sleep 99", "background": True})
+        )
         sid = bg["session_id"]
     handler_fn = handle_ssh_terminal(mgr)
     result = json.loads(handler_fn({"poll": sid}))
@@ -457,6 +461,7 @@ def test_ssh_terminal_poll_without_machine(tmp_path: Path) -> None:
 def test_ssh_terminal_read_output_without_machine(tmp_path: Path) -> None:
     """read_output should work without machine/command"""
     from ssh_tools.handlers.terminal import handle_ssh_terminal
+
     mgr = _make_manager(tmp_path)
     result = json.loads(handle_ssh_terminal(mgr)({"read_output": "nonexistent"}))
     assert result["success"] is False

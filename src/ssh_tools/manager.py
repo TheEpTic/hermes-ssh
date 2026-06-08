@@ -131,6 +131,7 @@ class SSHManager:
     def _validate_machine_name(name: str) -> str | None:
         """Return an error message if the machine name is unsafe, else None."""
         import re
+
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", name):
             return (
                 "Machine name must be 1-64 chars, alphanumeric, dots, hyphens, "
