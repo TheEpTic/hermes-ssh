@@ -49,6 +49,10 @@ class SSHConfig:
         """Create all required directories with restricted permissions."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.socket_dir.mkdir(parents=True, exist_ok=True)
+        # Clean orphaned temp files from previous crashes
+        for tmp in self.data_dir.glob("*.tmp"):
+            with contextlib.suppress(OSError):
+                tmp.unlink()
         # Restrict permissions — data dir contains machine credentials
         for d in (self.data_dir, self.socket_dir):
             with contextlib.suppress(OSError):

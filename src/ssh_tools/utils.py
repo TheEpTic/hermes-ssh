@@ -17,7 +17,7 @@ def err(msg: str) -> str:
 
 
 def require(params: dict[str, Any], *fields: str) -> str | None:
-    """Check that required fields are present and non-empty.
+    """Check that required fields are present and non-None.
 
     Returns error message string if any field is missing, None if all ok.
     """

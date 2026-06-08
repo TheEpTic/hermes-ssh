@@ -78,6 +78,8 @@ class SSHManager:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
                 f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp_path, str(path))
         except Exception:
             with contextlib.suppress(OSError):
@@ -88,7 +90,10 @@ class SSHManager:
 
     def _load_machines(self) -> dict[str, dict[str, Any]]:
         raw = self._read_json(self._config.machines_file, {"machines": {}})
-        result: dict[str, dict[str, Any]] = raw.get("machines", {})
+        result = raw.get("machines", {})
+        if not isinstance(result, dict):
+            logger.warning("Corrupt machines.json structure, resetting")
+            return {}
         return result
 
     def _save_machines(self, machines: dict[str, dict[str, Any]]) -> None:
@@ -122,8 +127,22 @@ class SSHManager:
                 return mname
         return None
 
+    @staticmethod
+    def _validate_machine_name(name: str) -> str | None:
+        """Return an error message if the machine name is unsafe, else None."""
+        import re
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", name):
+            return (
+                "Machine name must be 1-64 chars, alphanumeric, dots, hyphens, "
+                "underscores — no slashes, spaces, or glob metacharacters"
+            )
+        return None
+
     def add_machine(self, machine: Machine) -> Machine:
         """Add or update a machine. Returns the stored machine."""
+        name_err = self._validate_machine_name(machine.name)
+        if name_err:
+            raise ValueError(name_err)
         if not machine.added:
             machine = replace(machine, added=datetime.now(UTC).isoformat())
         with self._lock:
@@ -185,7 +204,10 @@ class SSHManager:
 
     def _load_sessions(self) -> dict[str, dict[str, Any]]:
         raw = self._read_json(self._config.sessions_file, {"sessions": {}})
-        result: dict[str, dict[str, Any]] = raw.get("sessions", {})
+        result = raw.get("sessions", {})
+        if not isinstance(result, dict):
+            logger.warning("Corrupt sessions.json structure, resetting")
+            return {}
         return result
 
     def _save_sessions(self, sessions: dict[str, dict[str, Any]]) -> None:
@@ -232,9 +254,14 @@ class SSHManager:
 
     def _cleanup_output_files(self, session_id: str) -> None:
         """Remove any /tmp/ output files saved for this session."""
-        for p in Path("/tmp").glob(f"ssh_output_{session_id}_*.txt"):
-            with contextlib.suppress(OSError):
-                p.unlink()
+        prefix = f"ssh_output_{session_id}_"
+        try:
+            for p in Path("/tmp").iterdir():
+                if p.name.startswith(prefix) and p.name.endswith(".txt"):
+                    with contextlib.suppress(OSError):
+                        p.unlink()
+        except OSError:
+            pass
 
     def close_session(self, session_id: str) -> None:
         self._cleanup_output_files(session_id)
@@ -303,6 +330,9 @@ class SSHManager:
                 results["socket_closed"] = True
             except Exception:
                 pass
+            # Remove orphaned socket file
+            with contextlib.suppress(OSError):
+                os.unlink(session.control_path)
 
         self.close_session(session_id)
         return {"success": True, **results}
@@ -369,6 +399,8 @@ class SSHManager:
         """Mark multiple sessions as closed in a single file write."""
         if not session_ids:
             return
+        for sid in session_ids:
+            self._cleanup_output_files(sid)
         with self._lock:
             sessions = self._load_sessions()
             for sid in session_ids:
@@ -387,6 +419,8 @@ class SSHManager:
                 if sdata.get("status") != "active":
                     try:
                         started = datetime.fromisoformat(sdata.get("started", ""))
+                        if started.tzinfo is None:
+                            started = started.replace(tzinfo=UTC)
                         if (now - started).total_seconds() > hours * 3600:
                             to_remove.append(sid)
                     except (ValueError, TypeError):
@@ -462,7 +496,9 @@ class SSHManager:
             background: If True, launch via Popen and return immediately.
             max_output_chars: Truncate stdout/stderr beyond this length.
         """
-        timeout = timeout or self._config.command_timeout
+        timeout = int(timeout) if timeout is not None else self._config.command_timeout
+        if timeout <= 0:
+            timeout = self._config.command_timeout
 
         machine = self.get_machine(machine_name)
         if not machine:
@@ -484,12 +520,13 @@ class SSHManager:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
-                self._processes[session_id] = proc
+                # Register session first so kill_session can find it
                 self.register_session(
                     Session(
                         id=session_id, machine=canonical, pid=proc.pid, control_path=control_path
                     )
                 )
+                self._processes[session_id] = proc
                 elapsed = round(time.monotonic() - start_time, 2)
                 self._log_command(
                     canonical, command, exit_code=None, elapsed=elapsed, session_id=session_id
@@ -574,7 +611,9 @@ class SSHManager:
         if len(text) <= max_chars:
             return text, None
         path = Path(f"/tmp/ssh_output_{session_id}_{stream}.txt")
-        path.write_text(text, encoding="utf-8")
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
         summary = (
             f"[output saved to {path} — {len(text):,} chars total, "
             f"first {max_chars:,} shown below]\n"
@@ -590,11 +629,13 @@ class SSHManager:
         Returns a dict with ``running`` (bool) and, when the process has
         finished, the collected stdout/stderr plus the exit code.
         """
-        proc = self._processes.get(session_id)
+        proc = self._processes.pop(session_id, None)
         if proc is None:
             return {"success": False, "error": f"No background process for session '{session_id}'"}
         exit_code = proc.poll()
         if exit_code is None:
+            # Still running — put it back
+            self._processes[session_id] = proc
             return {"success": True, "session_id": session_id, "running": True}
         # Process finished — collect output
         stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
@@ -602,7 +643,6 @@ class SSHManager:
         max_chars = self._config.max_output_chars
         stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
         stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
-        self._processes.pop(session_id, None)
         self.close_session(session_id)
         resp: dict[str, Any] = {
             "success": True,
@@ -625,11 +665,13 @@ class SSHManager:
         process is still running — it is intended for callers who already
         know the process has finished.
         """
-        proc = self._processes.get(session_id)
+        proc = self._processes.pop(session_id, None)
         if proc is None:
             return {"success": False, "error": f"No background process for session '{session_id}'"}
         exit_code = proc.poll()
         if exit_code is None:
+            # Still running — put it back so poll_session can collect later
+            self._processes[session_id] = proc
             return {
                 "success": False,
                 "error": f"Process for session '{session_id}' is still running",
@@ -639,7 +681,6 @@ class SSHManager:
         max_chars = self._config.max_output_chars
         stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
         stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
-        self._processes.pop(session_id, None)
         self.close_session(session_id)
         resp2: dict[str, Any] = {
             "success": True,
@@ -675,19 +716,12 @@ class SSHManager:
         }
         try:
             self._config.data_dir.mkdir(parents=True, exist_ok=True)
-            # Create with restrictive permissions (0o600) on first write.
-            # os.open with O_CREAT|O_EXCL creates only if not exists, mode
-            # applies only to new files — existing files keep their perms.
-            try:
-                fd = os.open(
-                    str(self._audit_log_path),
-                    os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_EXCL,
-                    0o600,
-                )
-                os.close(fd)
-            except FileExistsError:
-                pass  # file already exists, perms are fine
-            with self._audit_log_path.open("a", encoding="utf-8") as fh:
+            fd = os.open(
+                str(self._audit_log_path),
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry) + "\n")
         except OSError:
             logger.debug("Failed to append to audit log %s", self._audit_log_path, exc_info=True)
@@ -696,10 +730,15 @@ class SSHManager:
         """Return the last *limit* entries from the command audit log."""
         if not self._audit_log_path.exists():
             return []
-        lines = self._audit_log_path.read_text(encoding="utf-8").splitlines()
-        tail = lines[-limit:]
+        with self._audit_log_path.open("rb") as f:
+            f.seek(0, 2)  # end
+            size = f.tell()
+            read_size = min(size, 64 * 1024)  # read last 64KB max
+            f.seek(max(0, size - read_size))
+            tail = f.read().decode("utf-8", errors="replace")
+        lines = tail.splitlines()[-limit:]
         entries: list[dict[str, Any]] = []
-        for line in tail:
+        for line in lines:
             stripped = line.strip()
             if not stripped:
                 continue

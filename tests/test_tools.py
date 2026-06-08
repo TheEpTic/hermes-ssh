@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import ssh_tools
 from ssh_tools.handlers import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
@@ -432,3 +432,32 @@ def test_sessions_read_output_missing_id(tmp_path: Path) -> None:
     result = json.loads(handler({"action": "read_output"}))
     assert result["success"] is False
     assert "session_id is required" in result["error"]
+
+
+# ---- Bug fix: poll/read_output without machine/command ----
+
+def test_ssh_terminal_poll_without_machine(tmp_path: Path) -> None:
+    """poll should work without machine/command"""
+    from ssh_tools.handlers.terminal import handle_ssh_terminal
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.Popen") as mock_popen:
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        bg = json.loads(handle_ssh_terminal(mgr)({"machine": "h", "command": "sleep 99", "background": True}))
+        sid = bg["session_id"]
+    handler_fn = handle_ssh_terminal(mgr)
+    result = json.loads(handler_fn({"poll": sid}))
+    assert result["success"] is True
+    assert result["running"] is True
+
+
+def test_ssh_terminal_read_output_without_machine(tmp_path: Path) -> None:
+    """read_output should work without machine/command"""
+    from ssh_tools.handlers.terminal import handle_ssh_terminal
+    mgr = _make_manager(tmp_path)
+    result = json.loads(handle_ssh_terminal(mgr)({"read_output": "nonexistent"}))
+    assert result["success"] is False
+    assert "No background process" in result["error"]

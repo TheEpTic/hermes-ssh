@@ -23,7 +23,7 @@ Subcommands:
 
 Background commands:
   Use ssh_terminal with background=true to run long commands.
-  Output is truncated to max_output_lines (default: 500).
+  Output is truncated to max_output_chars (default: 50000).
   Use ssh_sessions poll/read_output to check status and get results.
 """
 
@@ -86,7 +86,8 @@ def create_slash_handler(
 
         # Inspect machine
         canonical = manager.resolve_name(name)
-        assert canonical is not None  # machine exists, resolve must succeed
+        if canonical is None:
+            return f"Machine '{name}' found but resolution failed"
         lines = [
             f"Machine: {canonical}",
             f"  Host: {target.host}",

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+import pytest
 
 from ssh_tools.models import Machine, Session
 
@@ -1043,3 +1046,145 @@ def test_idle_checker_auto_prunes(tmp_path: Path) -> None:
     count = mgr.prune_closed()
     assert count == 1
     assert mgr.get_session("s_old") is None
+
+
+# ---- Bug fix: machine name validation ----
+
+def test_validate_machine_name_valid() -> None:
+    assert SSHManager._validate_machine_name("myserver") is None
+    assert SSHManager._validate_machine_name("web-01") is None
+    assert SSHManager._validate_machine_name("grid1.example.com") is None
+    assert SSHManager._validate_machine_name("a") is None
+
+
+def test_validate_machine_name_invalid() -> None:
+    assert SSHManager._validate_machine_name("../../etc/passwd") is not None
+    assert SSHManager._validate_machine_name("my server") is not None
+    assert SSHManager._validate_machine_name("test*") is not None
+    assert SSHManager._validate_machine_name("") is not None
+    assert SSHManager._validate_machine_name("a" * 65) is not None
+
+
+def test_add_machine_rejects_bad_name(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    with pytest.raises(ValueError, match=r"alphanumeric|invalid"):
+        mgr.add_machine(Machine(name="../../etc", host="1.1.1.1"))
+
+
+# ---- Bug fix: /tmp output file permissions ----
+
+def test_maybe_save_output_permissions(tmp_path: Path) -> None:
+    """Output files saved to /tmp should be 0o600 (owner-only)."""
+    mgr = _make_manager(tmp_path)
+    big_text = "x" * 100
+    _summary, path_str = mgr._maybe_save_output(big_text, 10, "test_session", "stdout")
+    assert path_str is not None
+    path = Path(path_str)
+    assert path.exists()
+    mode = path.stat().st_mode & 0o777
+    assert mode == 0o600, f"Expected 0o600, got octal {oct(mode)}"
+    path.unlink()
+
+
+# ---- Bug fix: structure validation ----
+
+def test_load_machines_corrupt_structure(tmp_path: Path) -> None:
+    """Corrupt machines.json with wrong structure should not crash."""
+    mgr = _make_manager(tmp_path)
+    mgr._config.machines_file.write_text(json.dumps({"machines": [1, 2, 3]}))
+    result = mgr._load_machines()
+    assert result == {}
+
+
+def test_load_sessions_corrupt_structure(tmp_path: Path) -> None:
+    """Corrupt sessions.json with wrong structure should not crash."""
+    mgr = _make_manager(tmp_path)
+    mgr._config.sessions_file.write_text(json.dumps({"sessions": "not a dict"}))
+    result = mgr._load_sessions()
+    assert result == {}
+
+
+# ---- Bug fix: timeout type safety ----
+
+def test_run_command_timeout_type_coercion(tmp_path: Path) -> None:
+    """String timeout should be coerced to int, not crash."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = mgr.run_command("h", "echo ok", timeout="5")
+        assert result["success"] is True
+
+
+def test_run_command_zero_timeout_uses_default(tmp_path: Path) -> None:
+    """timeout=0 should fall back to default."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = mgr.run_command("h", "echo ok", timeout=0)
+        assert result["success"] is True
+
+
+# ---- Bug fix: _close_sessions_batch cleans /tmp ----
+
+def test_close_sessions_batch_cleans_tmp(tmp_path: Path) -> None:
+    """Batch-closed sessions should have their /tmp output files cleaned."""
+    mgr = _make_manager(tmp_path)
+    fake_file = Path("/tmp/ssh_output_test_batch_stdout.txt")
+    fake_file.write_text("test")
+    try:
+        mgr._close_sessions_batch(["test_batch"])
+        assert not fake_file.exists()
+    finally:
+        with contextlib.suppress(OSError):
+            fake_file.unlink()
+
+
+# ---- Bug fix: startup temp cleanup ----
+
+def test_ensure_dirs_cleans_orphaned_tmp(tmp_path: Path) -> None:
+    """ensure_dirs should clean orphaned .tmp files from data_dir."""
+    from ssh_tools.config import SSHConfig
+    config = SSHConfig(data_dir=tmp_path)
+    (tmp_path / "machines_abc.tmp").write_text("old")
+    (tmp_path / "sessions_def.tmp").write_text("old")
+    config.ensure_dirs()
+    assert not (tmp_path / "machines_abc.tmp").exists()
+    assert not (tmp_path / "sessions_def.tmp").exists()
+
+
+# ---- Bug fix: prune_closed handles naive datetime ----
+
+def test_prune_closed_naive_datetime(tmp_path: Path) -> None:
+    """Sessions with naive timestamps should be pruned, not skipped."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    sessions = {
+        "s_naive": {
+            "id": "s_naive", "machine": "h", "status": "closed",
+            "started": "2020-01-01T00:00:00",
+            "last_active": "2020-01-01T00:00:00", "command_count": 0,
+        }
+    }
+    mgr._write_json(mgr._config.sessions_file, {"sessions": sessions})
+    count = mgr.prune_closed(max_age_hours=1)
+    assert count == 1
+
+
+# ---- Bug fix: background session registration order ----
+
+def test_background_session_registered_before_process(tmp_path: Path) -> None:
+    """Session should be in JSON before process is in _processes dict."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.Popen") as mock_popen:
+        proc = MagicMock()
+        proc.pid = 99999
+        mock_popen.return_value = proc
+        result = mgr.run_command("h", "sleep 99", background=True)
+        sid = result["session_id"]
+        session = mgr.get_session(sid)
+        assert session is not None
+        assert session.pid == 99999
+        assert sid in mgr._processes

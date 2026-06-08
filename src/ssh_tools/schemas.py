@@ -36,11 +36,11 @@ SSH_TERMINAL_SCHEMA = {
             },
             "poll": {
                 "type": "string",
-                "description": "Poll a background session for status",
+                "description": "Session ID of a background command to poll for status. Returns running (bool), stdout, stderr, exit_code.",
             },
             "read_output": {
                 "type": "string",
-                "description": "Read output from a completed background session",
+                "description": "Session ID of a completed background command to read full stdout/stderr from.",
             },
         },
         "required": ["machine", "command"],
@@ -114,7 +114,7 @@ SSH_SESSIONS_SCHEMA = {
             },
             "session_id": {
                 "type": "string",
-                "description": "Session ID (required for kill)",
+                "description": "Session ID (required for kill, poll, read_output)",
             },
             "max_idle_minutes": {
                 "type": "integer",

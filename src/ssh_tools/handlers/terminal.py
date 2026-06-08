@@ -16,21 +16,15 @@ def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_terminal that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
+        # Handle poll/read_output first — these don't need machine/command
+        if params.get("poll"):
+            return ok(**manager.poll_session(params["poll"]))
+        if params.get("read_output"):
+            return ok(**manager.read_output(params["read_output"]))
+
         error = require(params, "machine", "command")
         if error:
             return err(error)
-
-        # Handle poll for a background session
-        poll_session = params.get("poll")
-        if poll_session:
-            result = manager.poll_session(poll_session)
-            return ok(**result)
-
-        # Handle read_output for a completed background session
-        read_session = params.get("read_output")
-        if read_session:
-            result = manager.read_output(read_session)
-            return ok(**result)
 
         background = params.get("background", False)
         result = manager.run_command(
