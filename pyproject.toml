@@ -84,6 +84,7 @@ ignore = [
     "S110",   # try-except-pass is intentional for cleanup
     "PTH105", # os.replace is fine
     "PTH108", # os.unlink is fine
+    "PTH101",  # os.chmod is fine
     "PTH110", # os.path.exists is fine
     "PLW0602",# global read is fine
     "PLW0603",# global write is fine

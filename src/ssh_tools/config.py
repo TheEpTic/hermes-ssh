@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,9 +43,13 @@ class SSHConfig:
         return self.data_dir / "sockets"
 
     def ensure_dirs(self) -> None:
-        """Create all required directories."""
+        """Create all required directories with restricted permissions."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.socket_dir.mkdir(parents=True, exist_ok=True)
+        # Restrict permissions — data dir contains machine credentials
+        for d in (self.data_dir, self.socket_dir):
+            with contextlib.suppress(OSError):
+                os.chmod(d, 0o700)
 
 
 # Module-level default — importable, overridable for tests

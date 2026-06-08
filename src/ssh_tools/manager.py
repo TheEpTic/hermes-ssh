@@ -631,6 +631,18 @@ class SSHManager:
         }
         try:
             self._config.data_dir.mkdir(parents=True, exist_ok=True)
+            # Create with restrictive permissions (0o600) on first write.
+            # os.open with O_CREAT|O_EXCL creates only if not exists, mode
+            # applies only to new files — existing files keep their perms.
+            try:
+                fd = os.open(
+                    str(self._audit_log_path),
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_EXCL,
+                    0o600,
+                )
+                os.close(fd)
+            except FileExistsError:
+                pass  # file already exists, perms are fine
             with self._audit_log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry) + "\n")
         except OSError:
