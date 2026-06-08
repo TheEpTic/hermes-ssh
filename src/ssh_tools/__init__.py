@@ -17,7 +17,7 @@ from .handlers.slash import create_slash_handler
 from .manager import SSHManager
 from .schemas import SSH_MACHINES_SCHEMA, SSH_SESSIONS_SCHEMA, SSH_TERMINAL_SCHEMA
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "SSH_MACHINES_SCHEMA",
     "SSH_SESSIONS_SCHEMA",

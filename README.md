@@ -18,103 +18,189 @@ ssh_sessions list
 
 > **Requires Python 3.11+** and an OpenSSH client (`ssh`) on the host system.
 
+### Option 1: Deploy script (recommended)
+
 ```bash
-# Clone and deploy
 git clone https://github.com/TheEpTic/hermes-ssh.git
 cd hermes-ssh
 ./deploy.sh
-
-# Restart Hermes
-/reset
 ```
 
-Or manually:
+Then restart Hermes with `/reset`.
+
+### Option 2: Manual symlink
 
 ```bash
 git clone https://github.com/TheEpTic/hermes-ssh.git
-ln -s ./hermes-ssh/src/ssh_tools ~/.hermes/plugins/hermes-ssh
-# Then /reset in Hermes
+ln -s "$(pwd)/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
+```
+
+Then `/reset` in Hermes. Changes to the source take effect immediately through the symlink — no restart needed.
+
+### Option 3: As a Python package
+
+```bash
+pip install git+https://github.com/TheEpTic/hermes-ssh.git
+```
+
+Then add to your Hermes config:
+
+```yaml
+plugins:
+  - name: hermes-ssh
+    module: ssh_tools
 ```
 
 ## Features
 
-**`ssh_terminal`** — Run any command on a remote machine. Commands run through `bash -c` with `pipefail`, so pipelines work correctly. Long-running commands can be backgrounded, and output is automatically truncated when it exceeds safe limits.
+### `ssh_terminal` — Run Commands
 
-**`ssh_machines`** — Register servers once, refer to them by name. Supports aliases, tags, and connectivity tests.
+Execute any command on a remote machine. Commands run through `bash -c` with `pipefail`, so pipelines work correctly.
 
-**`ssh_sessions`** — Tracks every command you run. Idle sessions get cleaned up automatically after 30 minutes.
+```bash
+# Synchronous (waits for completion)
+ssh_terminal machine=web1 command="df -h"
 
-**`/ssh` slash command** — Quick access from chat. Inspect machines, run commands, test connectivity.
+# Background (returns immediately)
+ssh_terminal machine=web1 command="tail -f /var/log/syslog" background=true
 
-### Background Commands
+# With timeout
+ssh_terminal machine=web1 command="make -j4" timeout=300
+```
 
-Commands can be run in the background — the plugin tracks them and lets you check status or retrieve output later.
+**Output truncation:** When output exceeds `max_output_chars` (default: 50,000), the full output is saved to a `/tmp/` file and a summary with the file path is returned. The LLM can then use `read_file` to access the complete output.
 
-### Output Truncation
+**Background commands:** Long-running commands can be backgrounded. The plugin tracks the process and lets you poll for status or retrieve output later.
 
-Command output is automatically truncated to prevent context overflow. Large outputs are clipped with a note that the result was truncated.
+```bash
+# Check if still running
+ssh_terminal poll=<session_id>
 
-### Command Audit Log
+# Read output from completed command
+ssh_terminal read_output=<session_id>
 
-Every command executed through the plugin is logged with timestamps, the target machine, and the exit code. Review past activity with `ssh_sessions`.
+# Or via ssh_sessions
+ssh_sessions action=poll session_id=<session_id>
+ssh_sessions action=read_output session_id=<session_id>
+```
 
-### Connection Reuse
+### `ssh_machines` — Machine Registry
 
-SSH connections are reused via `ControlMaster` with a 5-minute persist window. The second command to the same host is instant.
-
-## Examples
+Register servers once, refer to them by name or alias.
 
 ```bash
 # Add a server
-ssh_machines add name=web1 host=192.168.1.50 user=deploy key=~/.ssh/id_ed25519
+ssh_machines action=add name=web1 host=192.168.1.50 user=deploy key=~/.ssh/id_ed25519
 
-# Run a command
-ssh_terminal machine=web1 command="df -h"
+# Add with aliases and tags
+ssh_machines action=add name=prod-web host=10.0.0.1 aliases=web1,tags=production,web
 
-# Via slash command
-/ssh web1 uptime
-/ssh web1 docker ps
+# List all machines
+ssh_machines action=list
 
-# Check connectivity
-/ssh test
+# Test connectivity
+ssh_machines action=test name=web1
 
-# Clean up idle sessions
-/ssh cleanup
+# Get full details
+ssh_machines action=inspect name=web1
 ```
 
-## How It Works
+Machine names must be alphanumeric with dots, hyphens, or underscores (1-64 chars). Slashes, spaces, and glob characters are rejected.
 
-hermes-ssh gives Hermes three tools and one slash command:
+### `ssh_sessions` — Session Tracking
 
-| Tool | Purpose |
-|------|---------|
-| `ssh_terminal` | Run commands on remote machines |
-| `ssh_machines` | Manage the machine registry |
-| `ssh_sessions` | Track and clean up sessions |
-| `/ssh` | Chat-native interface to all of the above |
+Every command creates a session. Sessions track the PID, machine, command count, and idle time.
 
-Machines are stored in `data/machines.json` inside the plugin directory. Sessions are tracked in `data/sessions.json`. ControlMaster sockets live in `data/sockets/`. Everything is local — no external services.
+```bash
+# List active sessions
+ssh_sessions action=list
+
+# Kill a session (terminates the SSH process)
+ssh_sessions action=kill session_id=<session_id>
+
+# Clean up all idle sessions (>30 min)
+ssh_sessions action=cleanup
+
+# Remove old closed sessions (>24 hours)
+ssh_sessions action=prune
+```
+
+Idle sessions are automatically killed by a background checker after 30 minutes. Closed sessions are pruned after 24 hours.
+
+### `/ssh` Slash Command
+
+Quick access from chat without remembering tool names:
+
+```
+/ssh                     # List machines and sessions
+/ssh web1                # Inspect a machine
+/ssh web1 uptime         # Run a command
+/ssh web1 docker ps      # Run a command
+/ssh test                # Test connectivity to all machines
+/ssh cleanup             # Kill all idle sessions
+/ssh help                # Show help
+```
 
 ## Configuration
 
-All settings live in `src/ssh_tools/config.py` as `SSHConfig`:
+All settings live in `src/ssh_tools/config.py` as an `SSHConfig` dataclass:
 
-| Setting | Default | What It Does |
-|---------|---------|--------------|
+| Setting | Default | Description |
+|---------|---------|-------------|
 | `default_port` | 22 | SSH port for new machines |
 | `default_user` | root | SSH user for new machines |
-| `connect_timeout` | 5s | How long to wait for SSH handshake |
-| `command_timeout` | 30s | How long before a command is killed |
-| `idle_timeout_minutes` | 30m | Auto-kill sessions idle longer than this |
-| `strict_host_key_checking` | no | Host key verification |
+| `connect_timeout` | 5s | SSH handshake timeout |
+| `command_timeout` | 30s | Command execution timeout |
+| `max_output_chars` | 50,000 | Output truncation threshold |
+| `idle_check_interval` | 60s | Seconds between idle checks |
+| `idle_timeout_minutes` | 30m | Auto-kill after this idle time |
+| `closed_prune_hours` | 24h | Remove closed sessions after this |
+| `strict_host_key_checking` | no | SSH host key verification |
+
+## Architecture
+
+```
+src/ssh_tools/
+├── __init__.py          # Plugin registration + Hermes hooks
+├── config.py            # SSHConfig (immutable dataclass)
+├── manager.py           # SSHManager — all state and operations
+├── models.py            # Machine, Session dataclasses
+├── schemas.py           # Tool schemas (LLM-facing)
+├── utils.py             # ok(), err(), require() helpers
+├── py.typed             # PEP 561 marker
+└── handlers/
+    ├── terminal.py      # ssh_terminal (execute, poll, read_output)
+    ├── machines.py      # ssh_machines (add/list/remove/test/inspect)
+    ├── sessions.py      # ssh_sessions (list/kill/cleanup/prune/poll/read_output)
+    └── slash.py         # /ssh slash command
+```
+
+**Key design decisions:**
+
+- `SSHManager` owns all state. Thread-safe. No module-level mutable state.
+- Handlers are thin closures — validate params, dispatch to manager, return JSON.
+- JSON files use atomic writes (temp file + `os.replace`) for crash safety.
+- Data directory has restricted permissions (0o700). Audit log and output files use 0o600.
+- Machine names are validated to prevent path traversal and glob injection.
+- Connection reuse via `ControlMaster` with 5-minute persist window.
 
 ## Security
 
-**`StrictHostKeyChecking=no` is the default.** This makes first-time connections work without manual key verification, but means you're vulnerable to MITM attacks on untrusted networks. For production hosts, set it to `yes` in your SSH config.
-
-Machine credentials (host, user, key path) are stored in plaintext JSON. The data directory is created inside the plugin directory with default filesystem permissions.
-
 See [SECURITY.md](SECURITY.md) for the full picture.
+
+**Defaults you should know about:**
+
+- `StrictHostKeyChecking=no` — convenient but vulnerable to MITM. Set to `yes` for production.
+- Credentials stored in plaintext JSON at `data/machines.json`. Data directory is 0o700.
+- All commands execute with the permissions of the Hermes agent process.
+
+**Hardening applied:**
+
+- Machine names validated against `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`
+- Output files written with 0o600 permissions
+- Audit log created with 0o600 permissions
+- Atomic JSON writes prevent corruption on crash
+- Orphaned temp files cleaned on startup
 
 ## Requirements
 
@@ -125,16 +211,19 @@ See [SECURITY.md](SECURITY.md) for the full picture.
 ## Troubleshooting
 
 **Connection refused**
-The remote host may not be listening on the expected port, or a firewall is blocking the connection. Verify with `ssh -v user@host` outside of Hermes. Check that `default_port` in the plugin config matches the remote SSH port.
+The remote host may not be listening on the expected port, or a firewall is blocking the connection. Verify with `ssh -v user@host` outside of Hermes.
 
 **Permission denied (publickey)**
 The SSH key path stored in the machine registry may be incorrect, or the remote host doesn't have the corresponding public key in `~/.ssh/authorized_keys`. Verify with `ssh -i /path/to/key user@host`.
 
 **Command timeout**
-Commands exceeding `command_timeout` (default 30s) are killed. Increase the timeout in your config or break long-running work into background tasks. For jobs that take longer than a few minutes, run them in a screen/tmux session on the remote host.
+Commands exceeding `command_timeout` (default 30s) are killed. Increase the timeout or use `background=true` for long-running work.
 
 **Output looks truncated**
-This is intentional — the plugin truncates large outputs to avoid context overflow. The full output is still available on the remote host. Run the command directly over SSH if you need the complete output.
+This is intentional — large outputs are saved to `/tmp/` and a summary is returned. Use `read_output` or `read_file` on the returned path for the full output.
+
+**Session stuck as "active" after process died**
+If the agent restarted, background process references are lost. Use `ssh_sessions action=cleanup` to kill stale sessions, or `ssh_sessions action=prune` to remove old closed ones.
 
 ## Development
 
@@ -151,7 +240,7 @@ mypy src/ssh_tools/
 pytest
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and project structure.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
