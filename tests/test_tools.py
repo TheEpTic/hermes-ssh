@@ -466,3 +466,86 @@ def test_ssh_terminal_read_output_without_machine(tmp_path: Path) -> None:
     result = json.loads(handle_ssh_terminal(mgr)({"read_output": "nonexistent"}))
     assert result["success"] is False
     assert "No background process" in result["error"]
+
+
+# ---- Hermes approval integration ----
+
+
+def test_approval_not_available_commands_pass(tmp_path: Path) -> None:
+    """When Hermes approval system is not installed, commands execute normally."""
+    from unittest.mock import patch as mock_patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+    with (
+        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=None),
+        mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = json.loads(handler({"machine": "h", "command": "echo test"}))
+        assert result["success"] is True
+
+
+def test_approval_denies_dangerous_command(tmp_path: Path) -> None:
+    """When approval system denies, command is not executed."""
+    from unittest.mock import patch as mock_patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+    deny_result = {"approved": False, "message": "BLOCKED: recursive delete flagged"}
+    with (
+        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=deny_result),
+        mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
+    ):
+        result = json.loads(handler({"machine": "h", "command": "rm -rf /home"}))
+        assert result["success"] is False
+        assert "BLOCKED" in result["error"]
+        mock_run.assert_not_called()
+
+
+def test_approval_allows_safe_command(tmp_path: Path) -> None:
+    """When approval system approves, command executes normally."""
+    from unittest.mock import patch as mock_patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+    approve_result = {"approved": True, "message": None}
+    with (
+        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=approve_result),
+        mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = json.loads(handler({"machine": "h", "command": "ls"}))
+        assert result["success"] is True
+        mock_run.assert_called()
+
+
+def test_approval_none_passes_through(tmp_path: Path) -> None:
+    """When _check_approval returns None (approved), command executes."""
+    from unittest.mock import patch as mock_patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+    with (
+        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=None),
+        mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = json.loads(handler({"machine": "h", "command": "whoami"}))
+        assert result["success"] is True
+
+
+def test_approval_does_not_block_poll(tmp_path: Path) -> None:
+    """Poll/read_output should bypass approval checks entirely."""
+    from unittest.mock import patch as mock_patch
+
+    mgr = _make_manager(tmp_path)
+    handler = handle_ssh_terminal(mgr)
+    with mock_patch("ssh_tools.handlers.terminal._check_approval") as mock_check:
+        result = json.loads(handler({"read_output": "nonexistent"}))
+        assert result["success"] is False
+        mock_check.assert_not_called()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from ..utils import err, ok, require
@@ -10,6 +11,31 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ..manager import SSHManager
+
+logger = logging.getLogger(__name__)
+
+# Hermes dangerous command approval — optional integration.
+# When running inside Hermes, this hooks into the native approval system
+# (approvals.mode config, YOLO bypass, session/permanent allowlists).
+# When running standalone, approval checks are silently skipped.
+try:
+    from tools.approval import (
+        check_dangerous_command as _check_dangerous,
+    )
+
+    def _check_approval(command: str) -> dict[str, Any] | None:
+        """Check command against Hermes approval system.
+
+        Returns the approval result dict if the command needs approval
+        or is blocked, None if approved (safe to proceed).
+        """
+        return _check_dangerous(command, env_type="ssh")  # type: ignore[no-any-return]
+
+except ImportError:
+    logger.debug("Hermes approval system not available — SSH commands will not be checked")
+
+    def _check_approval(command: str) -> dict[str, Any] | None:
+        return None
 
 
 def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
@@ -25,6 +51,11 @@ def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
         error = require(params, "machine", "command")
         if error:
             return err(error)
+
+        # Check command against Hermes approval system
+        approval = _check_approval(params["command"])
+        if approval is not None and not approval.get("approved", True):
+            return err(approval.get("message", "Command blocked by approval system"))
 
         background = params.get("background", False)
         result = manager.run_command(
